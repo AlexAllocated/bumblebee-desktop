@@ -36,7 +36,7 @@ let
 in { environment.systemPackages = [ bumblebee ]; }
 ```
 
-Use the actual release asset filename. This example does not claim that the release exists yet. Enable a Secret Service implementation such as GNOME Keyring in your desktop session, and a StatusNotifier tray to retain access while streaming with the window closed.
+Use the actual release asset filename. This example does not claim that the release exists yet. The wrapper includes the Bumblebee application-menu entry and icon as well as its executable. Enable a Secret Service implementation such as GNOME Keyring in your desktop session, and a StatusNotifier tray to retain access while streaming with the window closed.
 
 ## Installation and upgrade checks
 
