@@ -2,7 +2,7 @@
 
 This document describes observed results, not release promises.
 
-The desktop application is an unsigned development preview. Windows and Linux installer checks passed, along with core, rendering and native audio lifecycle tests. Live streaming sessions, interactive tray/autostart behavior and a real version-to-version upgrade remain separate verification boundaries.
+The desktop application is an unsigned development preview. Current and historical evidence are separated below. Live streaming sessions, interactive tray/autostart behavior and cross-platform upgrade coverage remain separate verification boundaries.
 
 Azure retirement evidence and the private source snapshot are stored outside this public repository. Production data is intentionally not being migrated.
 
@@ -24,7 +24,40 @@ Both actual package tarballs were installed into an independent temporary consum
 
 The license collector was regenerated from the current resolved dependency tree and produced identical output on a second run. Its generated resource includes the upstream MIT license text and copyright for `immer 11.1.21` and `uuid 14.0.2`; each workspace package includes the project MIT license. The existing packaging workflow regenerates dependency notices, then Linux OS-runtime notices, before bundling. The local resource is not a substitute for the platform-specific notice collection and final installer inspection.
 
-The installer, native-webview and OBS results below describe the earlier preview at `26b3731`, whose renderer preceded this package restoration. They do **not** establish that the current dashboard/package revision has passed Windows/Linux CI, installed native smoke, actual OBS playback, or provider-to-overlay synchronization. Those gates must be rerun for the new release candidate; live integrations, tray/autostart and version-to-version upgrades remain separate checks.
+The historical preview, native-webview and OBS sections below describe `26b3731`, whose renderer preceded this package restoration. Current installer results are recorded separately; the earlier OBS capture does not establish actual OBS playback or provider-to-overlay synchronization for the restored renderer.
+
+## Preview 2 installers — 2026-10-08
+
+[Installer run 37751866939](https://github.com/AlexAllocated/bumblebee-desktop/actions/runs/37751866939) passed for source `69e95224ba55c189decfafa60d3e4143e1d8003f`, application version 0.1.1. Windows and Linux both passed package/interface checks, renderer tests and native tests. All three installed smoke tests passed: Windows NSIS, Linux Debian and Linux AppImage. They loaded the restored Svelte/package renderer and verified visible bee-model pixels, SQLite persistence, temporary OS-keyring operations, Speech/TEN VAD lifecycle, and the loopback assets/WebSocket/token-revocation contract. They did not start a streaming session or call a provider.
+
+The exact CI AppImage also passed the full smoke through the repository's Nix wrapper on the maintainer's NixOS workstation, under isolated Xvfb without development-library paths. Its SHA-256 is `67f1cd96457593ece4452ab4408c8052444b2f5880771f9c7a0a0127828fa6b3`, also pinned in [packaging](packaging.md#nixos-installation). The native Nix source build passed the same smoke separately; that source-built Debian file was not published.
+
+All installer checksums matched the CI artifact manifests. Archive inspections found the required project, artwork, dependency and native notices, including the new Immer/UUID notices. No environment, database, keyring, private-key or private-resume files were found. Windows matched all 48 preparation-resource hashes. AppImage/Deb executable differences were confined to ELF linkage metadata and Tauri's bundle-type marker; executable code sections matched. These are bounded inventory/pattern checks, not a repeated comparison against every historical credential value.
+
+The workstation's declarative dotfiles pin was updated from Preview 1 to Preview 2. `nix flake check --all-systems`, the complete system build, and activation all passed. The actual installed launcher passed the isolated smoke, then the ordinary application reopened against its existing data. SQLite upgraded from schema 3 to 4; every pre-existing installation setting and the OBS token matched a fresh private backup. All six configured credential entries remained in the OS store. This installation had no chatter/history/memory/reminder rows yet; populated migration behavior is covered separately by the core tests. The authenticated local rendering endpoint and its JavaScript/CSS assets returned successfully. No session was started; live integrations remain deferred. The independent resume and tunnel services stayed active.
+
+## Restored dashboard browser check — 2026-10-08
+
+The real Svelte dashboard and shared package renderer were exercised in Chrome against the isolated fixture at source revision `69e9522`. From the repository root, after installing dependencies, run:
+
+```sh
+bunx vite --config tests/ui/vite.config.ts
+```
+
+Open `http://127.0.0.1:1422/` for the dashboard and `http://127.0.0.1:1422/overlay.html` for the rendering-only fixture. This explicitly injected test backend stores fixture settings in browser local storage under `bumblebee-dashboard-ui-fixture-v2`; it does not use the application's SQLite database or OS credentials. Connection badges and account records are fixture data. Speech controls use locally generated silent PCM and supplied word timings, with `audible: false`. No provider request, platform connection, microphone, native audio device or actual OBS instance is involved.
+
+Observed checks:
+
+- Moving Bumblebee and resizing from a corner retained its camera-facing actor behavior. Reloading restored the same editor bounds. Changing the streamer bubble theme, moving its camera target and resizing that target persisted; the rendering-only tab received those saved settings.
+- The original package rendered the animated Bee, a Dandy chat puppet, its Twitch icon/nameplate and progressively revealed speech bubble. A 6,000-character dashboard speech preview advanced through bounded caption pages; the observed content's scroll height equaled its client height rather than overflowing vertically.
+- An injected owner-caption event displayed the supplied text. The empty-text revocation event removed it. This exercises renderer handling of core events, not live Discord consent or transcription.
+- Switching the renderer fixture between 960×540 and 800×600 kept Bumblebee correctly positioned and facing the camera. This found and fixed an engine-aspect update missing before responsive placement. Renderer startup passed the actual nontransparent-model-pixel readiness check; resized frames were inspected visually.
+- With both editor preview flags saved as enabled, the rendering-only view showed neither a sample puppet nor the static streamer placeholder. Real chat speech displayed one chatter puppet, and revoking the real caption left no placeholder. The dashboard retained its editing previews. This found and fixed editor-only samples leaking into the broadcast view.
+- Contextual overlay controls were readable in the dark dashboard. There were three editable subjects: Bumblebee, ordinary chat puppets and the separate streamer bubble; no Discord participant-puppet controls were present.
+
+For a focused repeat, enable the chat and streamer previews in the dashboard, move and resize their frames, change a bubble theme, reload, then use the rendering fixture's speech/caption/revocation and viewport controls. The dashboard's Test speech field accepts the long-caption case without synthesizing speech. Keep the tab foregrounded for visual timing checks; background-tab throttling is not evidence of an active renderer stall.
+
+The focused renderer suite passed 22 tests with 80 assertions, and Svelte checking reported zero errors or warnings after the last browser fixes. This browser run establishes the tested editor and renderer behavior with explicit local events. It does not establish the installed Tauri webview, its HTTP/WebSocket transport, audible timing, actual OBS Browser Source, or live provider-to-overlay synchronization for this revision. The historical OBS recording below predates this package restoration and is not a substitute for those checks.
 
 ## Core behavior
 

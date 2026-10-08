@@ -27,7 +27,7 @@ The renderer build is also used by the local OBS server during desktop developme
 Add the preview's repository tag to your flake inputs:
 
 ```nix
-inputs.bumblebee-desktop.url = "github:AlexAllocated/bumblebee-desktop/v0.1.0-preview.1";
+inputs.bumblebee-desktop.url = "github:AlexAllocated/bumblebee-desktop/v0.1.1-preview.2";
 ```
 
 Then pin its AppImage URL and SHA-256 in your Nix configuration:
@@ -35,9 +35,9 @@ Then pin its AppImage URL and SHA-256 in your Nix configuration:
 ```nix
 let
   bumblebee = inputs.bumblebee-desktop.lib.packageAppImage {
-    version = "0.1.0-preview.1";
-    url = "https://github.com/AlexAllocated/bumblebee-desktop/releases/download/v0.1.0-preview.1/Bumblebee_0.1.0_amd64.AppImage";
-    sha256 = "b25f636be0ed4bcf1b60399fd1c38f81d73c8b0d92eb93cd56efd3af9732064e";
+    version = "0.1.1-preview.2";
+    url = "https://github.com/AlexAllocated/bumblebee-desktop/releases/download/v0.1.1-preview.2/Bumblebee_0.1.1_amd64.AppImage";
+    sha256 = "67f1cd96457593ece4452ab4408c8052444b2f5880771f9c7a0a0127828fa6b3";
   };
 in { environment.systemPackages = [ bumblebee ]; }
 ```

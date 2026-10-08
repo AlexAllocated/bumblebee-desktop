@@ -2,7 +2,7 @@
 
 Bumblebee is a streaming companion with a voice, a personality, and a puppet for every chatter. This is the standalone desktop successor to Bumblebee's hosted service: a Rust application with a Svelte interface, packaged with Tauri for Windows and Linux.
 
-**Development preview:** [download v0.1.0-preview.1](https://github.com/AlexAllocated/bumblebee-desktop/releases/tag/v0.1.0-preview.1) for Windows or Linux. Installers are unsigned. See [verification status](docs/verification.md) for the installed-package checks and remaining live-session testing limits.
+**Development preview:** [download v0.1.1-preview.2](https://github.com/AlexAllocated/bumblebee-desktop/releases/tag/v0.1.1-preview.2) for Windows or Linux. Installers are unsigned. See [verification status](docs/verification.md) for the installed-package checks and remaining live-session testing limits.
 
 ## Using Bumblebee
 

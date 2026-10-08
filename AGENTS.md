@@ -3,6 +3,7 @@
 This is the new standalone desktop product, not the archived SaaS stack.
 
 - Rust owns application behavior, providers, credentials, SQLite and audio. Svelte owns the desktop interface. The localhost server exposes OBS rendering only.
+- This is a monorepo. Preserve `@hivetech/bumblebee` and `@hivetech/speech-bubbles` under `packages/`; the desktop and OBS adapter consume their public APIs. Put shared rendering fixes in those packages, not app-local copies. Keep Discord participant puppets excluded.
 - Preserve cancellation, confirmation identity and uncertain-action recovery. Never repeat an external action merely because its previous result is missing.
 - No Docker, server databases, bundled JavaScript backend, cloud storage, accounts, billing, promotions, mods or raffles.
 - Keep secrets out of Git and browser assets. Store keys in the OS credential store.
