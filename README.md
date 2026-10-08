@@ -2,7 +2,7 @@
 
 Bumblebee is a streaming companion with a voice, a personality, and a puppet for every chatter. This is the standalone desktop successor to Bumblebee's hosted service: a Rust application with a Svelte interface, packaged with Tauri for Windows and Linux.
 
-**Development preview:** [download v0.1.1-preview.2](https://github.com/AlexAllocated/bumblebee-desktop/releases/tag/v0.1.1-preview.2) for Windows or Linux. Installers are unsigned. See [verification status](docs/verification.md) for the installed-package checks and remaining live-session testing limits.
+**Development preview:** [download v0.1.2-preview.3](https://github.com/AlexAllocated/bumblebee-desktop/releases/tag/v0.1.2-preview.3) for Windows or Linux. Installers are unsigned. See [verification status](docs/verification.md) for the installed-package checks and remaining live-session testing limits.
 
 ## Using Bumblebee
 
@@ -23,16 +23,16 @@ Follow the [provider setup guide](docs/provider-setup.md) for application regist
 
 A viewer receives a random built-in puppet and voice on first participation. That selection persists across restarts and is tied to the platform's stable user ID.
 
-| Command | Action |
-| --- | --- |
-| `!puppet` | Show the current selection and help |
-| `!puppet random` | Pick another built-in puppet |
-| `!puppet <name>` | Select a built-in puppet |
-| `!puppet <https-image-url>` | Submit an image for streamer approval |
-| `!voice` | Show the current voice and help |
-| `!voice random` | Pick another voice |
-| `!voice <name>` | Select a curated preset or an Azure English voice |
-| `!voices <search>` | Find voices; use the returned pagination hint for more |
+| Command                     | Action                                                 |
+| --------------------------- | ------------------------------------------------------ |
+| `!puppet`                   | Show the current selection and help                    |
+| `!puppet random`            | Pick another built-in puppet                           |
+| `!puppet <name>`            | Select a built-in puppet                               |
+| `!puppet <https-image-url>` | Submit an image for streamer approval                  |
+| `!voice`                    | Show the current voice and help                        |
+| `!voice random`             | Pick another voice                                     |
+| `!voice <name>`             | Select a curated preset or an Azure English voice      |
+| `!voices <search>`          | Find voices; use the returned pagination hint for more |
 
 The dashboard retains the draggable overlay editor and a single dark Settings drawer. Position and resize Bumblebee, chat puppets and the separate streamer caption bubble; the same layout renders in OBS. Discord voice puppets are not included.
 
