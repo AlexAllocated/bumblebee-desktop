@@ -146,15 +146,7 @@ impl Providers {
 				tokio::time::Instant::now() < deadline,
 				"Device authorization expired; connect again"
 			);
-			let response = self
-				.http
-				.post("https://id.twitch.tv/oauth2/token")
-				.form(&[
-					("client_id", client),
-					("device_code", device),
-					("scope", scopes),
-					("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-				])
+			let response = twitch_device_token_request(&self.http, client, device, scopes)
 				.send()
 				.await?;
 			if response.status().is_success() {
@@ -443,6 +435,21 @@ impl Providers {
 	}
 }
 
+fn twitch_device_token_request(
+	http: &reqwest::Client,
+	client: &str,
+	device: &str,
+	scopes: &str,
+) -> reqwest::RequestBuilder {
+	http.post("https://id.twitch.tv/oauth2/token").form(&[
+		("client_id", client),
+		("device_code", device),
+		// Twitch's DCF request contract is plural; token responses use `scope`.
+		("scopes", scopes),
+		("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+	])
+}
+
 #[async_trait::async_trait]
 trait TokenEndpoint: Send + Sync {
 	async fn refresh(&self, provider: &str, tokens: &Tokens) -> Result<TokenResponse>;
@@ -548,6 +555,42 @@ async fn google_callback(listener: TcpListener, expected_state: &str) -> Result<
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn twitch_device_poll_serializes_the_required_public_client_form() {
+		for groups in [
+			vec![],
+			vec!["twitch_broadcast".into(), "twitch_moderation".into()],
+		] {
+			let scopes = crate::agent::platform_tools::required_twitch_scopes(&groups).join(" ");
+			let request = twitch_device_token_request(
+				&reqwest::Client::new(),
+				"public-client",
+				"device+/=code",
+				&scopes,
+			)
+			.build()
+			.unwrap();
+			assert_eq!(request.method(), reqwest::Method::POST);
+			assert_eq!(request.url().as_str(), "https://id.twitch.tv/oauth2/token");
+			assert_eq!(
+				request.headers()[reqwest::header::CONTENT_TYPE],
+				"application/x-www-form-urlencoded"
+			);
+			let body = request.body().unwrap().as_bytes().unwrap();
+			let fields: std::collections::BTreeMap<_, _> =
+				url::form_urlencoded::parse(body).into_owned().collect();
+			assert_eq!(fields.len(), 4);
+			assert_eq!(fields["client_id"], "public-client");
+			assert_eq!(fields["device_code"], "device+/=code");
+			assert_eq!(
+				fields["grant_type"],
+				"urn:ietf:params:oauth:grant-type:device_code"
+			);
+			assert_eq!(fields["scopes"], scopes);
+			assert!(!fields.contains_key("scope"));
+			assert!(!fields.contains_key("client_secret"));
+		}
+	}
 	#[tokio::test]
 	async fn forged_callback_does_not_consume_valid_authorization() {
 		let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
