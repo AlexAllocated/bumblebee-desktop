@@ -80,6 +80,7 @@ pub struct TurnRecord {
 	pub state: String,
 	pub checkpoint: Value,
 	pub updated_at: i64,
+	pub resumable: bool,
 }
 
 impl Store {
@@ -91,12 +92,18 @@ impl Store {
 				[id],
 				|r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
 			)?;
+		let checkpoint: Value = serde_json::from_str(&checkpoint)?;
+		let resumable = state == "interrupted"
+			&& updated_at >= now_ms() - 86_400_000
+			&& checkpoint["recovery_eligible"] == true
+			&& checkpoint["pending"].is_null();
 		Ok(TurnRecord {
 			id,
 			actor,
 			state,
-			checkpoint: serde_json::from_str(&checkpoint)?,
+			checkpoint,
 			updated_at,
+			resumable,
 		})
 	}
 	pub fn interrupted_turns(&self) -> Result<Vec<TurnRecord>> {
@@ -111,7 +118,7 @@ impl Store {
 	}
 	pub fn suspend_turn(&self, input: &PendingInput, checkpoint: &Value) -> Result<()> {
 		ensure!(
-			matches!(input.kind.as_str(), "confirmation" | "question"),
+			matches!(input.kind.as_str(), "confirmation" | "question" | "access"),
 			"Invalid pending input kind"
 		);
 		ensure!(

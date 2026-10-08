@@ -7,6 +7,15 @@ use std::{
 };
 
 const SCHEMA_VERSION: i64 = 4;
+
+/// Only explicitly classified pure reads may bypass a prior uncertain effect.
+/// Local writes are mutations even when they never call an external provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallEffect {
+	ReadOnly,
+	MayMutate,
+}
+
 pub struct Store {
 	pub(crate) connection: Mutex<Connection>,
 }
@@ -565,12 +574,40 @@ impl Store {
         );
 		Ok(())
 	}
+	/// Inspect a durable receipt without dispatching the operation again.
+	pub fn saved_call(
+		&self,
+		turn: &str,
+		call: &str,
+		name: &str,
+		args: &str,
+	) -> Result<Option<(String, Option<String>)>> {
+		let args = canonical_args(args)?;
+		let saved: Option<(String, String, String, Option<String>)> = self
+			.db()?
+			.query_row(
+				"SELECT name,args,state,result FROM tool_calls WHERE turn_id=? AND call_id=?",
+				params![turn, call],
+				|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+			)
+			.optional()?;
+		saved
+			.map(|(old_name, old_args, state, result)| {
+				ensure!(
+					old_name == name && old_args == args,
+					"Tool call identity reused with different arguments"
+				);
+				Ok((state, result))
+			})
+			.transpose()
+	}
 	pub fn begin_call(
 		&self,
 		turn: &str,
 		call: &str,
 		name: &str,
 		args: &str,
+		effect: CallEffect,
 	) -> Result<Option<String>> {
 		let args = canonical_args(args)?;
 		let mut db = self.db()?;
@@ -600,23 +637,40 @@ impl Store {
 			|r| r.get(0),
 		)?;
 		ensure!(active, "This turn is no longer running");
-		// A new call ID, reordered JSON or changed audit reason does not erase
-		// the same unresolved provider effect on the same resource.
-		let identity = uncertain_identity(name, &serde_json::from_str(&args)?);
-		let mut query =
-			tx.prepare("SELECT args FROM tool_calls WHERE name=? AND state IN ('started','unknown')")?;
-		let prior = query
-			.query_map([name], |r| r.get::<_, String>(0))?
-			.collect::<rusqlite::Result<Vec<_>>>()?;
-		let uncertain = prior.iter().any(|old| {
-			serde_json::from_str::<serde_json::Value>(old)
-				.is_ok_and(|old| uncertain_identity(name, &old) == identity)
-		});
-		drop(query);
-		ensure!(
-			!uncertain,
-			"An equivalent tool action has an uncertain outcome; inspect its state before retrying"
-		);
+		if effect == CallEffect::MayMutate {
+			// A new call ID, reordered JSON or changed audit reason does not erase
+			// the same unresolved provider effect on the same resource. Pure reads
+			// have no such effect: a lost read result must not block future inspection.
+			let identity = uncertain_identity(name, &serde_json::from_str(&args)?);
+			// These two creations are owned by the originating requester. A lost
+			// receipt for Alice's memory/reminder cannot be Bob's repeated effect.
+			// Exact-ID edits, shared settings, delivery and platform writes remain
+			// global: another actor must not bypass an unresolved shared action.
+			let actor: Option<String> = if matches!(name, "rememberMemory" | "createReminder") {
+				Some(
+					tx.query_row("SELECT actor FROM agent_turns WHERE id=?", [turn], |r| {
+						r.get(0)
+					})?,
+				)
+			} else {
+				None
+			};
+			let mut query = tx.prepare(
+				"SELECT c.args FROM tool_calls c LEFT JOIN agent_turns t ON t.id=c.turn_id WHERE c.name=? AND c.state IN ('started','unknown') AND (? IS NULL OR t.actor=? OR t.actor IS NULL)",
+			)?;
+			let prior = query
+				.query_map(params![name, actor, actor], |r| r.get::<_, String>(0))?
+				.collect::<rusqlite::Result<Vec<_>>>()?;
+			let uncertain = prior.iter().any(|old| {
+				serde_json::from_str::<serde_json::Value>(old)
+					.is_ok_and(|old| uncertain_identity(name, &old) == identity)
+			});
+			drop(query);
+			ensure!(
+				!uncertain,
+				"An equivalent tool action has an uncertain outcome; inspect its state before retrying"
+			);
+		}
 		tx.execute(
 			"INSERT INTO tool_calls(turn_id,call_id,name,args,state) VALUES (?,?,?,?,'started')",
 			params![turn, call, name, args],
@@ -653,7 +707,7 @@ impl Store {
 			[],
 		)?;
 		let changed = tx.execute(
-			"UPDATE agent_turns SET state='interrupted' WHERE state='running'",
+			"UPDATE agent_turns SET state='interrupted' WHERE state IN ('running','queued_recovery')",
 			[],
 		)?;
 		tx.commit()?;
@@ -912,7 +966,8 @@ mod tests {
 					"t",
 					"call",
 					"ban",
-					r#"{"user":"123","scope":{"b":2,"a":1}}"#
+					r#"{"user":"123","scope":{"b":2,"a":1}}"#,
+					CallEffect::MayMutate
 				)
 				.unwrap()
 				.is_none()
@@ -925,7 +980,8 @@ mod tests {
 				"t",
 				"call",
 				"ban",
-				r#"{"scope":{"a":1,"b":2},"user":"123"}"#
+				r#"{"scope":{"a":1,"b":2},"user":"123"}"#,
+				CallEffect::MayMutate
 			)
 			.is_err()
 		);
@@ -936,7 +992,8 @@ mod tests {
 				"new",
 				"different-call",
 				"ban",
-				r#"{"scope":{"a":1,"b":2},"user":"123"}"#
+				r#"{"scope":{"a":1,"b":2},"user":"123"}"#,
+				CallEffect::MayMutate
 			)
 			.is_err()
 		);
@@ -945,7 +1002,8 @@ mod tests {
 				"new",
 				"other-user",
 				"ban",
-				r#"{"scope":{"a":1,"b":2},"user":"456"}"#
+				r#"{"scope":{"a":1,"b":2},"user":"456"}"#,
+				CallEffect::MayMutate
 			)
 			.unwrap()
 			.is_none()
@@ -955,13 +1013,162 @@ mod tests {
 	fn completed_calls_reuse_observed_result_and_reject_identity_reuse() {
 		let s = store();
 		s.create_turn("t", "owner", &serde_json::json!({})).unwrap();
-		s.begin_call("t", "c", "read", "{}").unwrap();
+		s.begin_call("t", "c", "read", "{}", CallEffect::ReadOnly)
+			.unwrap();
 		s.finish_call("t", "c", "result").unwrap();
 		assert_eq!(
-			s.begin_call("t", "c", "read", "{}").unwrap().as_deref(),
+			s.begin_call("t", "c", "read", "{}", CallEffect::ReadOnly)
+				.unwrap()
+				.as_deref(),
 			Some("result")
 		);
-		assert!(s.begin_call("t", "c", "write", "{}").is_err());
+		assert!(
+			s.begin_call("t", "c", "write", "{}", CallEffect::MayMutate)
+				.is_err()
+		);
+	}
+	#[test]
+	fn interrupted_reads_allow_fresh_inspection_without_replaying_unknown_local_writes() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("app.db");
+		{
+			let s = Store::open(&path).unwrap();
+			s.create_turn("old", "discord:alice", &serde_json::json!({}))
+				.unwrap();
+			s.begin_call("old", "read", "listMemories", "{}", CallEffect::ReadOnly)
+				.unwrap();
+			s.begin_call(
+				"old",
+				"write",
+				"rememberMemory",
+				r#"{"content":"a durable fact"}"#,
+				CallEffect::MayMutate,
+			)
+			.unwrap();
+			// Simulate termination before either result is saved.
+		}
+		let s = Store::open(&path).unwrap();
+		s.recover_interrupted().unwrap();
+		// A read's original call identity still cannot silently execute twice.
+		assert!(
+			s.begin_call("old", "read", "listMemories", "{}", CallEffect::ReadOnly)
+				.is_err()
+		);
+		// Acknowledging the interrupted turn must neither poison every future read
+		// nor erase the unresolved mutation.
+		s.cancel_agent_turn("old").unwrap();
+		s.create_turn("new", "discord:bob", &serde_json::json!({}))
+			.unwrap();
+		assert!(
+			s.begin_call("new", "inspect", "listMemories", "{}", CallEffect::ReadOnly)
+				.unwrap()
+				.is_none()
+		);
+		s.finish_call("new", "inspect", "[]").unwrap();
+		assert_eq!(
+			s.begin_call("new", "inspect", "listMemories", "{}", CallEffect::ReadOnly)
+				.unwrap()
+				.as_deref(),
+			Some("[]")
+		);
+		s.create_turn("alice-retry", "discord:alice", &serde_json::json!({}))
+			.unwrap();
+		assert!(
+			s.begin_call(
+				"alice-retry",
+				"retry",
+				"rememberMemory",
+				r#"{"content":"a durable fact"}"#,
+				CallEffect::MayMutate
+			)
+			.is_err()
+		);
+	}
+	#[test]
+	fn uncertain_requester_owned_creations_do_not_poison_other_requesters_or_weaken_shared_writes() {
+		let dir = tempfile::tempdir().unwrap();
+		let s = Store::open(&dir.path().join("test.sqlite")).unwrap();
+		for (turn, actor) in [
+			("a", "discord:alice"),
+			("a2", "discord:alice"),
+			("b", "discord:bob"),
+		] {
+			s.create_turn(turn, actor, &serde_json::json!({})).unwrap();
+		}
+		for (name, args) in [
+			("rememberMemory", r#"{"content":"I like blue"}"#),
+			(
+				"createReminder",
+				r#"{"content":"stretch","dueAt":"2026-10-09T12:00:00Z"}"#,
+			),
+		] {
+			s.begin_call("a", name, name, args, CallEffect::MayMutate)
+				.unwrap();
+			s.mark_call_uncertain("a", name).unwrap();
+			assert!(
+				s.begin_call("a2", name, name, args, CallEffect::MayMutate)
+					.is_err()
+			);
+			assert_eq!(
+				s.begin_call("b", name, name, args, CallEffect::MayMutate)
+					.unwrap(),
+				None
+			);
+		}
+		for (name, args) in [
+			(
+				"setTwitchTitle",
+				r#"{"broadcasterId":"123","title":"same"}"#,
+			),
+			("updateMemory", r#"{"id":"shared-id","content":"same"}"#),
+			("updateSettings", r#"{"masterVolume":0.5}"#),
+		] {
+			s.begin_call("a", name, name, args, CallEffect::MayMutate)
+				.unwrap();
+			s.mark_call_uncertain("a", name).unwrap();
+			assert!(
+				s.begin_call("b", name, name, args, CallEffect::MayMutate)
+					.is_err(),
+				"shared action {name} must retain the global barrier"
+			);
+		}
+	}
+	#[test]
+	fn recovery_reads_exact_saved_receipts_and_reclaims_interrupted_queue_entries() {
+		let s = store();
+		s.create_turn("turn", "owner", &serde_json::json!({}))
+			.unwrap();
+		s.begin_call(
+			"turn",
+			"done",
+			"write",
+			r#"{"b":2,"a":1}"#,
+			CallEffect::MayMutate,
+		)
+		.unwrap();
+		s.finish_call("turn", "done", r#"{"status":"verified"}"#)
+			.unwrap();
+		s.begin_call("turn", "lost", "other", "{}", CallEffect::MayMutate)
+			.unwrap();
+		s.checkpoint_turn("turn", "queued_recovery", &serde_json::json!({}))
+			.unwrap();
+		s.recover_interrupted().unwrap();
+		assert_eq!(s.turn("turn").unwrap().state, "interrupted");
+		assert_eq!(
+			s.saved_call("turn", "done", "write", r#"{"a":1,"b":2}"#)
+				.unwrap(),
+			Some(("completed".into(), Some(r#"{"status":"verified"}"#.into())))
+		);
+		assert_eq!(
+			s.saved_call("turn", "lost", "other", "{}").unwrap(),
+			Some(("unknown".into(), None))
+		);
+		assert!(s.saved_call("turn", "done", "write", "{}").is_err());
+		assert!(
+			s.saved_call("turn", "done", "other", r#"{"a":1,"b":2}"#)
+				.is_err()
+		);
+		assert_eq!(s.saved_call("turn", "absent", "other", "{}").unwrap(), None);
 	}
 	#[test]
 	fn provider_deduplication_survives_restart_and_is_platform_scoped() {
@@ -1004,6 +1211,7 @@ mod tests {
 			"c1",
 			"banDiscordUser",
 			r#"{"guildId":"1","userId":"2","reason":"spam"}"#,
+			CallEffect::MayMutate,
 		)
 		.unwrap();
 		s.recover_interrupted().unwrap();
@@ -1014,7 +1222,8 @@ mod tests {
 				"second",
 				"c2",
 				"banDiscordUser",
-				r#"{"guildId":"1","userId":"2","reason":"retry with other text"}"#
+				r#"{"guildId":"1","userId":"2","reason":"retry with other text"}"#,
+				CallEffect::MayMutate
 			)
 			.is_err()
 		);
@@ -1023,7 +1232,8 @@ mod tests {
 				"second",
 				"c3",
 				"banDiscordUser",
-				r#"{"guildId":"1","userId":"3","reason":"spam"}"#
+				r#"{"guildId":"1","userId":"3","reason":"spam"}"#,
+				CallEffect::MayMutate
 			)
 			.is_ok()
 		);
@@ -1038,7 +1248,10 @@ mod tests {
 			s.checkpoint_turn("turn", "running", &serde_json::json!({}))
 				.is_err()
 		);
-		assert!(s.begin_call("turn", "new", "write", "{}").is_err());
+		assert!(
+			s.begin_call("turn", "new", "write", "{}", CallEffect::MayMutate)
+				.is_err()
+		);
 	}
 }
 

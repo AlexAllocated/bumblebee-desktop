@@ -6,6 +6,22 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
+pub(super) struct InvalidFinalResponse;
+impl std::fmt::Display for InvalidFinalResponse {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("The model's final response did not match Bumblebee's delivery format")
+	}
+}
+impl std::error::Error for InvalidFinalResponse {}
+pub(super) const SAFE_FAILURE_REPLY: &str = "Sorry, I couldn't format that response correctly. Earlier actions may have completed; please check their results before retrying.";
+pub(super) fn safe_failure_reply() -> FinalReply {
+	FinalReply {
+		text: SAFE_FAILURE_REPLY.into(),
+		messages: None,
+	}
+}
+
 const INSTRUCTIONS: &str = r#"You are Bumblebee, a small, playful AI streaming companion. Speak in first person, with warmth, concise practical answers and occasional dry humor. Keep your identity; you are not a configurable generic chatbot. Your on-screen Bumblebee body is your own.
 Start every request with configureTurnDelivery. Preserve explicit silence and privacy. That configuration remains fixed for this request. Never announce private work publicly. Use deliverMessage for explicitly requested additional destinations, and do not repeat content already delivered. A final response is an assistant message conforming to the supplied schema, not a tool.
 Carry out all requested work across multiple ordered tool rounds. Use discovery to resolve exact resource IDs before effects; never guess a user or mutate a vaguely matched target. Tools are capabilities, never permission grants. Tool results say verified, accepted, failed, declined or unknown. Accepted work is not proven finished. Unknown effects must not be repeated under a different tool call ID; inspect provider state instead. Never claim success without an observed receipt.
@@ -171,10 +187,30 @@ pub fn parse_response(response: Value) -> Result<(Vec<Value>, Vec<ToolCall>, Opt
 	if !calls.is_empty() {
 		return Ok((items, calls, None));
 	}
-	let reply: FinalReply = serde_json::from_str(&text)
+	let reply = parse_final_reply(&text).map_err(|_| InvalidFinalResponse)?;
+	Ok((items, calls, Some(reply)))
+}
+
+fn parse_final_reply(text: &str) -> Result<FinalReply> {
+	let envelope: Value = serde_json::from_str(&text)
 		.context("The model's final response did not match Bumblebee's delivery format")?;
+	// Serde treats a missing Option field as None. Validate the advertised exact
+	// shape first so an omitted messages field is not a compatibility fallback.
+	validate(&final_schema(), &envelope)
+		.context("The model's final response did not match Bumblebee's delivery format")?;
+	let reply: FinalReply = serde_json::from_value(envelope)?;
+	ensure!(
+		!contains_protocol_envelope(&reply.text),
+		"Final text contains a nested delivery envelope"
+	);
 	ensure!(reply.text.len() <= 60_000, "Final response is too long");
 	if let Some(messages) = &reply.messages {
+		ensure!(
+			messages
+				.iter()
+				.all(|message| !contains_protocol_envelope(&message.text)),
+			"Final message contains a nested delivery envelope"
+		);
 		ensure!(
 			messages.len() <= 20 && messages.iter().all(|m| m.artifact_ids.len() <= 10),
 			"Too many final message or artifact groups"
@@ -189,7 +225,36 @@ pub fn parse_response(response: Value) -> Result<(Vec<Value>, Vec<ToolCall>, Opt
 			"Final response text and message groups disagree"
 		);
 	}
-	Ok((items, calls, Some(reply)))
+	Ok(reply)
+}
+
+/// Legacy delivery objects must never be read aloud as if they were a reply.
+/// Ordinary JSON/code remains valid user content; only protocol-shaped objects
+/// are rejected, matching the old turn boundary rather than trying to repair it.
+fn contains_protocol_envelope(text: &str) -> bool {
+	let Ok(Value::Object(object)) = serde_json::from_str::<Value>(text.trim()) else {
+		return false;
+	};
+	let legacy_keys = [
+		"spokenSummary",
+		"chatResponse",
+		"followUpListen",
+		"followUpReason",
+		"followUpTimeoutMs",
+	];
+	let legacy = legacy_keys
+		.iter()
+		.filter(|key| object.contains_key(**key))
+		.count()
+		>= 2;
+	let nested = object
+		.get("finalResponse")
+		.and_then(Value::as_object)
+		.is_some_and(|nested| {
+			(nested.contains_key("text") && nested.contains_key("messages"))
+				|| (nested.contains_key("spokenSummary") && nested.contains_key("chatResponse"))
+		});
+	legacy || nested
 }
 
 /// Validate the same closed schemas advertised to the model before an executor

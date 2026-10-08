@@ -516,20 +516,60 @@
         class="panel pending-request"
       >
         <div>
-          <p class="eyebrow">INTERRUPTED ACTION</p>
-          <p>
-            A turn from {turn.actor} stopped before its outcome was known. Check the
-            affected service before making a new request. Bumblebee will not repeat
-            it automatically.
-          </p>
+          <p class="eyebrow">INTERRUPTED REQUEST</p>
+          {#if turn.resumable}
+            <p>
+              A request from {turn.actor} stopped before it finished. Resume continues
+              the saved work. Actions with an uncertain outcome stay blocked from
+              being repeated.
+            </p>
+            {#if !snapshot?.active}<p>
+                Start a session to resume this request.
+              </p>{/if}
+          {:else}
+            <p>
+              A request from {turn.actor} stopped before its outcome was known. Check
+              the affected service before making a new request. Bumblebee cannot safely
+              resume this request.
+            </p>
+          {/if}
+          {#if turn.receipts.length}
+            <details>
+              <summary>Delivery receipts</summary>
+              {#each turn.receipts as receipt}
+                <p>
+                  {receipt.destination ?? "Saved destination"}: {receipt.status}.
+                  Confirmed {receipt.completedParts ??
+                    receipt.messageIds.length}{#if receipt.totalParts !== null}
+                    of {receipt.totalParts}{/if} message parts.
+                  {#if receipt.unacknowledgedPartMayHaveSent}
+                    An additional part may have been sent.
+                  {/if}
+                </p>
+                {#if receipt.messageIds.length}
+                  <p>
+                    Message IDs: <code>{receipt.messageIds.join(", ")}</code>
+                  </p>
+                {/if}
+              {/each}
+            </details>
+          {/if}
         </div>
+        {#if turn.resumable}<button
+            disabled={!!busy || !snapshot?.active}
+            onclick={() =>
+              run("Resuming", async () => {
+                await invoke("resume_interrupted", { id: turn.id });
+                await activity();
+              })}>Resume</button
+          >{/if}
         <button
           disabled={!!busy}
           onclick={() =>
             run("Acknowledging", async () => {
               await invoke("dismiss_interrupted", { id: turn.id });
               await activity();
-            })}>Acknowledge</button
+            })}>{turn.resumable ? "Cancel request" : "Acknowledge"}</button
         >
       </section>{/each}
 

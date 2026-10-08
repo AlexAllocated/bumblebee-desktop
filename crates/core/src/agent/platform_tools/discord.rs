@@ -24,6 +24,18 @@ const SEND_THREADS: u64 = 1 << 38;
 const PIN: u64 = 1 << 51;
 const API: &str = "https://discord.com/api/v10";
 
+fn require_permission(who: &str, scope: &str, observed: u64, required: u64) -> Result<()> {
+	if observed & required != required {
+		return Err(
+			super::super::access::PermissionRequired(format!(
+				"Discord {who} lacks the required {scope} permission"
+			))
+			.into(),
+		);
+	}
+	Ok(())
+}
+
 fn mutation(
 	name: &str,
 	description: &str,
@@ -295,10 +307,12 @@ impl<'a> Discord<'a> {
 			("human owner", self.owner_id.as_str(), &self.owner),
 			("bot", self.bot_id.as_str(), &self.bot),
 		] {
-			ensure!(
-				effective_permissions(&self.guild, id, member, None) & bit == bit,
-				"Discord {who} lacks the required guild permission"
-			);
+			require_permission(
+				who,
+				"guild",
+				effective_permissions(&self.guild, id, member, None),
+				bit,
+			)?;
 		}
 		Ok(())
 	}
@@ -327,10 +341,7 @@ impl<'a> Discord<'a> {
 			("bot", self.bot_id.as_str(), &self.bot),
 		] {
 			let permissions = effective_permissions(&self.guild, id, member, Some(permission_channel));
-			ensure!(
-				permissions & (bits | VIEW) == bits | VIEW,
-				"Discord {who} lacks the required channel permission"
-			);
+			require_permission(who, "channel", permissions, bits | VIEW)?;
 			if channel_type == 12 && permissions & MANAGE_THREADS == 0 {
 				self
 					.read(&format!(
@@ -649,6 +660,150 @@ async fn request_super(
 	cancel: &CancellationToken,
 ) -> Result<Value> {
 	request(builder, "Discord", false, cancel).await
+}
+
+/// Read-only permission inspection. The executor repeats these checks just
+/// before mutation. REST failures and invalid targets remain hard errors.
+pub(super) async fn preflight(
+	engine: &Engine,
+	source: &ChatMessage,
+	name: &str,
+	args: &Value,
+	cancel: CancellationToken,
+) -> Result<()> {
+	let client = Discord::new(engine, source, cancel).await?;
+	if let Some(guild) = args["guildId"].as_str() {
+		ensure!(
+			guild == client.guild_id,
+			"Approved guild differs from current Settings; request a new action"
+		);
+	}
+	match name {
+		"createDiscordChannel" => {
+			client.guild_permission(MANAGE_CHANNELS)?;
+			if let Some(parent) = args["parentId"].as_str() {
+				client.parent(parent).await?;
+			}
+		}
+		"editDiscordChannel" | "deleteDiscordChannel" => {
+			let channel = client.channel(snowflake(args, "channelId")?).await?;
+			let thread = matches!(channel["type"].as_u64(), Some(10..=12));
+			ensure!(
+				name != "editDiscordChannel" || !thread,
+				"Use channel editing only for non-thread channels"
+			);
+			client
+				.channel_permission(
+					&channel,
+					if thread {
+						MANAGE_THREADS
+					} else {
+						MANAGE_CHANNELS
+					},
+				)
+				.await?;
+			if name == "editDiscordChannel" {
+				if let Some(parent) = args["parentId"].as_str() {
+					client.parent(parent).await?;
+				}
+			}
+		}
+		"moveDiscordVoiceUser" | "disconnectDiscordVoiceUser" | "discordStageControlUser" => {
+			let user = snowflake(args, "userId")?;
+			client.target(user, false).await?;
+			let voice = client.voice(user).await?;
+			let channel = client.channel(text(&voice, "channel_id", 20)?).await?;
+			if name == "discordStageControlUser" {
+				ensure!(
+					channel["type"] == 13 && channel["id"] == args["channelId"],
+					"Member is no longer in the approved Stage channel"
+				);
+				client.channel_permission(&channel, MUTE).await?;
+			} else {
+				client.channel_permission(&channel, MOVE).await?;
+				if name == "moveDiscordVoiceUser" {
+					let target = client.channel(snowflake(args, "channelId")?).await?;
+					ensure!(
+						matches!(target["type"].as_u64(), Some(2 | 13)),
+						"Destination is not a voice channel"
+					);
+					client.channel_permission(&target, MOVE | CONNECT).await?;
+				}
+			}
+		}
+		"timeoutDiscordUser" | "banDiscordUser" | "discordManageRole" | "setDiscordNickname" => {
+			let user = snowflake(args, "userId")?;
+			let target = client.target(user, true).await?;
+			if name == "timeoutDiscordUser" {
+				ensure!(
+					effective_permissions(&client.guild, user, &target, None) & ADMIN == 0,
+					"Cannot timeout administrators"
+				);
+			}
+			if name == "discordManageRole" {
+				let role = snowflake(args, "roleId")?;
+				ensure!(
+					client.roles().iter().any(|r| r["id"] == role),
+					"Role no longer exists"
+				);
+			}
+			client.guild_permission(match name {
+				"timeoutDiscordUser" => MODERATE,
+				"banDiscordUser" => BAN,
+				"discordManageRole" => MANAGE_ROLES,
+				_ => MANAGE_NICKNAMES,
+			})?;
+		}
+		"deleteDiscordMessage" | "pinDiscordMessage" | "unpinDiscordMessage" => {
+			let id = snowflake(args, "channelId")?;
+			let channel = client.channel(id).await?;
+			client.message(id, snowflake(args, "messageId")?).await?;
+			client
+				.channel_permission(
+					&channel,
+					HISTORY
+						| if name == "deleteDiscordMessage" {
+							MANAGE_MESSAGES
+						} else {
+							PIN
+						},
+				)
+				.await?;
+		}
+		"createDiscordThread" => {
+			let id = snowflake(args, "channelId")?;
+			let channel = client.channel(id).await?;
+			ensure!(
+				matches!(channel["type"].as_u64(), Some(0 | 5)),
+				"Public thread creation requires a text/news channel"
+			);
+			if let Some(message) = args["messageId"].as_str() {
+				client.message(id, message).await?;
+			}
+			client
+				.channel_permission(&channel, PUBLIC_THREADS | SEND)
+				.await?;
+		}
+		"inspectDiscordResources" if args["kind"] == "messages" => {
+			let channel = client.channel(snowflake(args, "channelId")?).await?;
+			client.channel_permission(&channel, HISTORY).await?;
+		}
+		"deliverMessage" if args["target"] == "discord_channel" => {
+			let channel = client.channel(snowflake(args, "destinationId")?).await?;
+			client
+				.channel_permission(
+					&channel,
+					if matches!(channel["type"].as_u64(), Some(10..=12)) {
+						SEND_THREADS
+					} else {
+						SEND
+					},
+				)
+				.await?;
+		}
+		_ => {}
+	}
+	Ok(())
 }
 
 pub(super) async fn execute(
@@ -1131,6 +1286,29 @@ mod tests {
 				&json!({"id":"9","position":2})
 			)
 			.is_gt()
+		);
+	}
+	#[test]
+	fn observed_permission_loss_is_repairable_but_restored_roles_pass_same_check() {
+		let guild = guild();
+		let mut channel =
+			json!({"permission_overwrites":[{"id":"8","type":1,"deny":SEND.to_string(),"allow":"0"}]});
+		let member = json!({"roles":["2"]});
+		let observed = effective_permissions(&guild, "8", &member, Some(&channel));
+		let error = require_permission("bot", "channel", observed, SEND | VIEW).unwrap_err();
+		assert!(
+			error
+				.downcast_ref::<super::super::super::access::PermissionRequired>()
+				.is_some()
+		);
+		channel["permission_overwrites"] = json!([]);
+		let restored = effective_permissions(&guild, "8", &member, Some(&channel));
+		require_permission("bot", "channel", restored, SEND | VIEW).unwrap();
+		// An unrelated ordinary API/target failure has no repairable marker.
+		assert!(
+			anyhow::anyhow!("Discord: Resource no longer exists (HTTP 404)")
+				.downcast_ref::<super::super::super::access::PermissionRequired>()
+				.is_none()
 		);
 	}
 	#[test]

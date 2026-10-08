@@ -143,6 +143,25 @@ pub async fn execute(
 	}
 }
 
+pub(super) async fn preflight_discord(
+	engine: &Engine,
+	source: &ChatMessage,
+	name: &str,
+	args: &Value,
+	cancel: &CancellationToken,
+) -> Result<Option<super::access::AccessBlocker>> {
+	match discord::preflight(engine, source, name, args, cancel.clone()).await {
+		Ok(()) => Ok(None),
+		Err(error) => {
+			if let Some(missing) = error.downcast_ref::<super::access::PermissionRequired>() {
+				Ok(Some(super::access::AccessBlocker::repair(&missing.0)))
+			} else {
+				Err(error)
+			}
+		}
+	}
+}
+
 pub async fn send_discord_message(
 	engine: &Engine,
 	source: &ChatMessage,

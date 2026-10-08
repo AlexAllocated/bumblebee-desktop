@@ -94,6 +94,11 @@ impl AudioRuntime {
 		))
 	}
 
+	/// Identity verified by the shared Discord gateway during connection.
+	pub fn bot_user_id(&self) -> String {
+		self.discord.bot_user_id.to_string()
+	}
+
 	pub fn health(&self) -> DiscordHealth {
 		self.discord.health()
 	}
@@ -276,18 +281,43 @@ impl AudioRuntime {
 		gain: f32,
 		cancellation: CancellationToken,
 	) -> Result<bool> {
+		self
+			.play_signal_gain_with_options(signal, gain, 1, None, cancellation)
+			.await
+	}
+	/// Repeat a cue in one padded playback batch, with a stable thinking variant.
+	/// Cancelling or dropping this future stops its own active track.
+	pub async fn play_signal_gain_with_options(
+		&self,
+		signal: SignalKey,
+		gain: f32,
+		repeat_count: u32,
+		variant_key: Option<&str>,
+		cancellation: CancellationToken,
+	) -> Result<bool> {
 		self.ensure_running()?;
 		anyhow::ensure!(
 			gain.is_finite() && (0.0..=2.0).contains(&gain),
 			"Invalid signal gain"
 		);
-		let bytes = signals::get_signal_audio(signal, Some(1.0), None, None)?;
+		let bytes = signal_wav_with_options(signal, repeat_count, variant_key)?;
+		// Generated cues are PCM WAVs with a 44-byte header. Allow the longest
+		// supported repeat batch to finish without shortening the usual deadline.
+		let bytes_per_second = u64::from(audio::DISCORD_SAMPLE_RATE)
+			* u64::from(audio::DISCORD_CHANNELS)
+			* u64::from(audio::DISCORD_BITS_PER_SAMPLE / 8);
+		let duration_ms = bytes.len().saturating_sub(44) as u64 * 1000 / bytes_per_second;
+		let timeout_ms = 10_000.max(duration_ms + 1000);
 		let class = if signal == SignalKey::ThinkingLoop {
 			PlaybackClass::Thinking
 		} else {
 			PlaybackClass::Cue
 		};
-		tokio::select! {biased; _=cancellation.cancelled()=>Ok(false),result=self.session.play_audio(bytes,PlaybackInputType::Encoded,Some(PlaybackMode::Urgent),class,Some(10_000),Some(gain),None)=>result}
+		tokio::select! {
+			biased;
+			_ = cancellation.cancelled() => Ok(false),
+			result = self.session.play_audio(bytes, PlaybackInputType::Encoded, Some(PlaybackMode::Urgent), class, Some(timeout_ms), Some(gain), None) => result,
+		}
 	}
 	pub async fn play_signal(
 		&self,
@@ -316,6 +346,15 @@ impl AudioRuntime {
 	}
 	pub fn reset_listen(&self, user_id: &str) {
 		self.session.reset_listen(user_id, true);
+	}
+	/// Finalize the current native capture once, preserving its pending audio/event order.
+	/// Repeated calls do not emit duplicate utterances after the native state is cleared.
+	pub fn finalize_utterance(&self, user_id: &str) -> Result<()> {
+		self.ensure_running()?;
+		self
+			.session
+			.finalize_utterance_for_user(user_id, "desktop_post_speech_deadline");
+		Ok(())
 	}
 	pub fn stream_participant(&self, user_id: &str, enabled: bool) {
 		self.session.set_streaming(user_id, enabled);
@@ -354,5 +393,54 @@ impl AudioRuntime {
 
 /// Shared cue bytes for the OBS renderer and native Discord playback.
 pub fn signal_wav(signal: SignalKey) -> Result<Vec<u8>> {
-	signals::get_signal_audio(signal, Some(1.0), None, None)
+	signal_wav_with_options(signal, 1, None)
+}
+
+/// Shared cue bytes with one padding pair around the whole repeat batch.
+/// Thinking variants are selected deterministically from the caller's turn key.
+/// Zero repeats retains the native default of one; counts above twelve fail.
+pub fn signal_wav_with_options(
+	signal: SignalKey,
+	repeat_count: u32,
+	variant_key: Option<&str>,
+) -> Result<Vec<u8>> {
+	signals::get_signal_audio(signal, Some(1.0), Some(repeat_count), variant_key)
+}
+
+#[cfg(test)]
+mod cue_tests {
+	use super::*;
+
+	#[test]
+	fn thinking_batch_repeats_the_same_clip_with_only_outer_padding() {
+		let single = signal_wav_with_options(SignalKey::ThinkingLoop, 1, Some("turn-42")).unwrap();
+		let batch = signal_wav_with_options(SignalKey::ThinkingLoop, 2, Some("turn-42")).unwrap();
+		let bytes_per_ms = 48_000 * 2 * 2 / 1000;
+		let padding = audio::PLAYBACK_PADDING_MS as usize * bytes_per_ms;
+		let clip = &single[44 + padding..single.len() - padding];
+		assert_eq!(single.len(), 44 + 1160 * bytes_per_ms);
+		assert_eq!(batch.len(), 44 + 2160 * bytes_per_ms);
+		assert_eq!(&batch[44 + padding..44 + padding + clip.len()], clip);
+		assert_eq!(
+			&batch[44 + padding + clip.len()..batch.len() - padding],
+			clip
+		);
+		assert!(batch[44..44 + padding].iter().all(|byte| *byte == 0));
+		assert!(batch[batch.len() - padding..].iter().all(|byte| *byte == 0));
+		assert_eq!(
+			u32::from_le_bytes(batch[40..44].try_into().unwrap()) as usize,
+			batch.len() - 44
+		);
+	}
+
+	#[test]
+	fn exported_cue_options_preserve_defaults_and_native_repeat_bound() {
+		assert_eq!(
+			signal_wav(SignalKey::WakeChirp).unwrap(),
+			signal_wav_with_options(SignalKey::WakeChirp, 0, Some("ignored")).unwrap()
+		);
+		assert!(signal_wav_with_options(SignalKey::ThinkingLoop, 13, None).is_err());
+		let longest = signal_wav_with_options(SignalKey::ThinkingLoop, 12, None).unwrap();
+		assert_eq!(longest.len(), 44 + 12_160 * (48_000 * 2 * 2 / 1000));
+	}
 }

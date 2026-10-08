@@ -96,25 +96,16 @@ impl Engine {
 			return Ok(());
 		}
 		let model = self.store.settings()?.streamer_transcription_model;
-		let form = reqwest::multipart::Form::new().text("model", model).part(
-			"file",
-			reqwest::multipart::Part::bytes(pcm_wav(&capture.pcm))
-				.file_name("caption.wav")
-				.mime_str("audio/wav")?,
-		);
 		// Re-read consent after awaited live membership, immediately before the paid request.
 		if !self.caption_allowed(&user_id)? {
 			return Ok(());
 		}
-		let response = tokio::select! {biased;_=capture.cancel.cancelled()=>return Ok(()),r=self.providers.http.post("https://api.openai.com/v1/audio/transcriptions").bearer_auth(self.providers.secret("openai")?).multipart(form).send()=>r?};
-		crate::providers::check_response("openai", &response)?;
-		let body: serde_json::Value =
-			tokio::select! {_=capture.cancel.cancelled()=>return Ok(()),body=response.json()=>body?};
+		let text = tokio::select! {biased;_=capture.cancel.cancelled()=>return Ok(()),text=self.providers.transcribe_audio(&model,pcm_wav(&capture.pcm),None,&capture.cancel)=>text?};
 		let member = tokio::select! {_=capture.cancel.cancelled()=>return Ok(()),member=audio.revalidate_participant(&user_id)=>member?};
 		if capture.cancel.is_cancelled() || member.is_none() || !self.caption_allowed(&user_id)? {
 			return Ok(());
 		}
-		let text = body["text"].as_str().unwrap_or("").trim();
+		let text = text.trim();
 		if !text.is_empty() && text.len() <= 16000 {
 			self.emit(OverlayEvent::VoiceTranscript {
 				user_id,

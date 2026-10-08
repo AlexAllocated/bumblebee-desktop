@@ -2179,6 +2179,9 @@ mod tests {
 			);
 		}
 
+		session.finalize_utterance_for_user(user_id, "desktop_post_speech_deadline");
+		// A queued silence timer or repeated deadline must not replace the first
+		// finalization, nor emit it before the pending PCM has been delivered.
 		session.finalize_utterance_for_user(user_id, "vad_silence");
 		assert!(rx.try_recv().is_err());
 
@@ -2203,10 +2206,12 @@ mod tests {
 					 voiced_ms,
 					 ..
 			  } if user_id == "user-1"
-					 && reason == "vad_silence"
+					 && reason == "desktop_post_speech_deadline"
 					 && duration_ms == 100
 					 && voiced_ms == 100
 		));
+		session.finalize_utterance_for_user(user_id, "desktop_post_speech_deadline");
+		session.finalize_utterance_for_user(user_id, "vad_silence");
 		assert!(rx.try_recv().is_err());
 	}
 

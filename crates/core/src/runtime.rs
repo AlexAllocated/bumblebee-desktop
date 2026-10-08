@@ -1,8 +1,10 @@
 //! Application-owned sessions with bounded input and speech queues.
 mod captions;
 mod queue;
+mod recovery;
 mod retained;
 mod signals;
+mod voice;
 use crate::{
 	commands,
 	model::{ChatMessage, Chatter, OverlayEvent, Settings},
@@ -12,9 +14,9 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bumblebee_audio::{AudioRuntime, NativeResources, VoiceEvent};
-use queue::{AgentJob, WorkScopes, run_agent_queue};
+use queue::{AgentInput, AgentJob, WorkScopes, run_agent_queue};
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	path::PathBuf,
 	sync::{
 		Arc,
@@ -50,6 +52,7 @@ pub struct Engine {
 	cue_cancel: std::sync::Mutex<CancellationToken>,
 	cue_kind: AtomicU8,
 	caption_cancel: std::sync::Mutex<CancellationToken>,
+	recovery_attempts: std::sync::Mutex<HashSet<String>>,
 }
 struct Session {
 	cancel: CancellationToken,
@@ -71,6 +74,9 @@ struct Capture {
 	pcm: Vec<u8>,
 	cancel: CancellationToken,
 	actor_scope: Arc<queue::ActorScope>,
+	started_at: tokio::time::Instant,
+	first_voice_at: Option<tokio::time::Instant>,
+	forced_finalize_at: Option<tokio::time::Instant>,
 }
 impl Engine {
 	pub fn new(
@@ -101,6 +107,7 @@ impl Engine {
 			cue_cancel: std::sync::Mutex::new(CancellationToken::new()),
 			cue_kind: AtomicU8::new(0),
 			caption_cancel: std::sync::Mutex::new(CancellationToken::new()),
+			recovery_attempts: std::sync::Mutex::new(HashSet::new()),
 		}))
 	}
 	pub fn is_active(&self) -> bool {
@@ -161,11 +168,19 @@ impl Engine {
 		jobs.push(tokio::spawn(run_agent_queue(
 			agent_rx,
 			token.clone(),
-			move |message, turn| {
+			move |input, turn| {
 				let engine = engine.clone();
 				let token = token.clone();
 				async move {
-					if let Err(error) = crate::agent::run(engine.clone(), message, turn.clone()).await {
+					let result = match input {
+						AgentInput::Message(message) => {
+							crate::agent::run(engine.clone(), message, turn.clone()).await
+						}
+						AgentInput::Recovery { turn_id } => {
+							crate::agent::recover_interrupted(engine.clone(), &turn_id, turn.clone()).await
+						}
+					};
+					if let Err(error) = result {
 						if !token.is_cancelled() && !turn.is_cancelled() {
 							engine.emit(OverlayEvent::Status {
 								message: error.to_string(),
@@ -245,6 +260,19 @@ impl Engine {
 		jobs.push(tokio::spawn(async move {
 			crate::agent::reminder_loop(engine, token).await;
 		}));
+		let engine = self.clone();
+		let recovery_cancel = self
+			.session
+			.lock()
+			.await
+			.as_ref()
+			.context("Session stopped")?
+			.agent_scopes
+			.epoch()
+			.child_token();
+		jobs.push(tokio::spawn(async move {
+			engine.recovery_loop(recovery_cancel).await;
+		}));
 		if let Some(session) = self.session.lock().await.as_mut() {
 			session.jobs = jobs;
 		}
@@ -255,12 +283,19 @@ impl Engine {
 	}
 	pub async fn stop(&self) -> Result<()> {
 		self.cancel_signals();
-		self.clear_streamer_caption()?;
 		let _lifecycle = self.lifecycle.lock().await;
 		let session = self.session.lock().await.take();
 		self.active.store(false, Ordering::SeqCst);
 		if let Some(session) = session.as_ref() {
 			session.cancel.cancel();
+		}
+		// Once detached, the session must finish shutting down even if SQLite is
+		// unavailable. Report durability failures only after every task is stopped.
+		let mut persistence = self.store.cancel_active_agent_work(None);
+		if let Err(error) = self.clear_streamer_caption() {
+			if persistence.is_ok() {
+				persistence = Err(error);
+			}
 		}
 		self.cancel().await;
 		if let Some(session) = session {
@@ -277,22 +312,30 @@ impl Engine {
 				}
 			}
 		}
-		// Every session task has finished or been aborted. Surface uncertain receipts immediately,
-		// including jobs that could not finish their own cancellation checkpoint before timeout.
-		self.store.recover_interrupted()?;
-		self.store.recover_agent_state()?;
+		// These attempts are independent so one failed write cannot skip cleanup.
+		for result in [
+			self.store.cancel_active_agent_work(None),
+			self.store.recover_interrupted().map(|_| ()),
+			self.store.recover_agent_state().map(|_| ()),
+		] {
+			if let Err(error) = result {
+				if persistence.is_ok() {
+					persistence = Err(error);
+				}
+			}
+		}
 		self.emit(OverlayEvent::StopSpeech);
 		self.providers.set_stream_chat_destination("twitch", None);
 		self.providers.set_stream_chat_destination("youtube", None);
 		self.emit(OverlayEvent::Status {
 			message: "Session stopped".into(),
 		});
-		Ok(())
+		persistence
 	}
 	pub async fn cancel(&self) {
 		self.cancel_signals();
-		let _ = self.clear_streamer_caption();
-		if let Some(session) = self.session.lock().await.as_mut() {
+		let mut session_guard = self.session.lock().await;
+		if let Some(session) = session_guard.as_mut() {
 			let epoch = session.agent_scopes.cancel_all(&session.cancel);
 			session.input_epoch.send_replace(epoch);
 			session.speech_cancel.cancel();
@@ -300,6 +343,13 @@ impl Engine {
 			session.voice_cancel.cancel();
 			session.voice_cancel = session.cancel.child_token();
 		}
+		let _ = self.clear_streamer_caption();
+		if let Err(error) = self.store.cancel_active_agent_work(None) {
+			self.emit(OverlayEvent::Status {
+				message: error.to_string(),
+			});
+		}
+		drop(session_guard);
 		self.preview_cancel.lock().await.cancel();
 		if let Some(audio) = self.audio().await {
 			audio.interrupt().await;
@@ -307,13 +357,18 @@ impl Engine {
 		self.emit(OverlayEvent::StopSpeech);
 	}
 	async fn cancel_actor(&self, actor: &str) -> bool {
-		self
-			.session
-			.lock()
-			.await
+		let mut session = self.session.lock().await;
+		let cancelled = session
 			.as_mut()
-			.is_some_and(|session| session.agent_scopes.cancel_actor(actor))
+			.is_some_and(|session| session.agent_scopes.cancel_actor(actor));
+		if let Err(error) = self.store.cancel_active_agent_work(Some(actor)) {
+			self.emit(OverlayEvent::Status {
+				message: error.to_string(),
+			});
+		}
+		cancelled
 	}
+
 	pub async fn say_preview(self: &Arc<Self>, text: String) -> Result<()> {
 		let token = {
 			let mut token = self.preview_cancel.lock().await;
@@ -449,7 +504,10 @@ impl Engine {
 			let scope = session.agent_scopes.lease(&actor);
 			session
 				.agent_tx
-				.try_send(AgentJob { message, scope })
+				.try_send(AgentJob {
+					input: AgentInput::Message(message),
+					scope,
+				})
 				.context("Bumblebee's conversation queue is full; try again shortly")?;
 			return Ok(());
 		}
@@ -489,7 +547,10 @@ impl Engine {
 		let settings = self.store.settings()?;
 		let private_dm =
 			message.platform == "discord" && message.channel_id != settings.discord_text_channel_id;
-		if !private_dm && chatter.overrides.chat_puppet != crate::model::Override::Block {
+		if message.platform != "discord_voice"
+			&& !private_dm
+			&& chatter.overrides.chat_puppet != crate::model::Override::Block
+		{
 			self.emit(OverlayEvent::Chat {
 				chatter: chatter.clone(),
 				text: message.text.clone(),
@@ -530,7 +591,10 @@ impl Engine {
 			}
 			session
 				.agent_tx
-				.try_send(AgentJob { message, scope })
+				.try_send(AgentJob {
+					input: AgentInput::Message(message),
+					scope,
+				})
 				.context("Bumblebee's conversation queue is full; try again shortly")?;
 		} else if settings.readout_allowed(&message, &chatter.overrides, message.is_owner)
 			&& !private_dm
@@ -564,24 +628,27 @@ impl Engine {
 			"youtube" => 200,
 			_ => 1900,
 		};
-		let mut receipts = Vec::new();
-		for part in split_message(text, limit) {
-			let receipt = if platform == "discord" {
-				self
-					.audio()
-					.await
-					.context("Discord is disconnected")?
-					.send_chat(&source.channel_id, &part)
-					.await?
-			} else {
-				self
-					.providers
-					.send_stream_chat(platform, &source.channel_id, &part)
-					.await?
-			};
-			receipts.push(receipt);
-		}
-		Ok(receipts)
+		let parts = split_message(text, limit);
+		crate::agent::send_parts(
+			&format!("{platform}:{}", source.channel_id),
+			&parts,
+			|_, part| async move {
+				if platform == "discord" {
+					self
+						.audio()
+						.await
+						.context("Discord is disconnected")?
+						.send_chat(&source.channel_id, &part)
+						.await
+				} else {
+					self
+						.providers
+						.send_stream_chat(platform, &source.channel_id, &part)
+						.await
+				}
+			},
+		)
+		.await
 	}
 	pub async fn refresh_voice_settings(&self) -> Result<()> {
 		let Some(audio) = self.audio().await else {
@@ -656,6 +723,9 @@ impl Engine {
 			pcm: Vec::new(),
 			cancel: session.voice_cancel.child_token(),
 			actor_scope: session.agent_scopes.lease(&format!("discord:{user_id}")),
+			started_at: tokio::time::Instant::now(),
+			first_voice_at: None,
+			forced_finalize_at: None,
 		}))
 	}
 	async fn run_discord(
@@ -679,10 +749,23 @@ impl Engine {
 			.status("discord", "connected", "Discord gateway connected");
 		let mut captures = HashMap::<String, Capture>::new();
 		let mut caption_captures = HashMap::<String, captions::CaptionCapture>::new();
+		let mut voice_turns = HashMap::new();
+		let mut cue_tokens = HashMap::<String, CancellationToken>::new();
+		let mut cue_jobs = JoinSet::new();
+		let mut capture_clock = tokio::time::interval(Duration::from_millis(200));
 		let mut sequence = None;
 		let mut transcriptions = JoinSet::<Result<()>>::new();
 		let result:Result<()>=async {loop {tokio::select!{
             _=cancel.cancelled()=>break,
+            _=capture_clock.tick()=>{
+                for user in voice::finalize_due_captures(&mut captures,tokio::time::Instant::now()) {audio.finalize_utterance(&user)?;}
+                for (user,capture,timed_out) in voice::expired_captures(&mut captures,tokio::time::Instant::now()) {
+                    voice_turns.remove(&user);
+                    if !caption_captures.contains_key(&user){audio.stream_participant(&user,false);}
+                    if timed_out {let plan=self.voice_cue(bumblebee_audio::SignalKey::TimeoutChirp,&capture)?;self.spawn_voice_cue(&mut cue_jobs,plan);}
+                }
+            },
+            _=cue_jobs.join_next(),if !cue_jobs.is_empty()=>{},
             finished=transcriptions.join_next(),if !transcriptions.is_empty()=>{
                 if let Some(Ok(Err(error)))=finished {self.emit(OverlayEvent::Status{message:error.to_string()});}
             },
@@ -708,9 +791,12 @@ impl Engine {
                     VoiceEvent::KeywordDetected{user_id,username,keyword_kind,..}=>{
                         if keyword_kind=="wake"{
                             if captures.len()>=4&&!captures.contains_key(&user_id){continue}
-                            let Some(capture)=self.begin_voice_capture(&user_id,username,audio.is_listen_allowed(&user_id)).await? else {continue};
+                            let Some(mut capture)=self.accept_voice_wake(&user_id,username,audio.is_listen_allowed(&user_id),&mut voice_turns).await? else {continue};
+                            capture.seed_wake_preroll(&incoming.payload);
+                            if let Some(previous)=cue_tokens.insert(user_id.clone(),capture.cancel.clone()){previous.cancel();}
+                            let cue=self.voice_cue(bumblebee_audio::SignalKey::WakeChirp,&capture)?;
                             audio.stream_participant(&user_id,true);
-                            let engine=self.clone();let cue=capture.cancel.clone();tokio::spawn(async move{let _=engine.play_cue(bumblebee_audio::SignalKey::WakeChirp,cue).await;});
+                            self.spawn_voice_cue(&mut cue_jobs,cue);
                             if let Some(previous)=captures.insert(user_id,capture){previous.cancel.cancel();}
                         }
                         else if keyword_kind=="cancel"||keyword_kind=="stop"{
@@ -725,11 +811,16 @@ impl Engine {
                                 if let Some(capture)=captures.remove(&user_id){capture.cancel.cancel();}
                                 audio.stream_participant(&user_id,false);
                             }
+                            if let Some(previous)=cue_tokens.remove(&user_id){previous.cancel();}
+                            if let Some((cue,token))=self.cancel_voice_cue(&user_id).await? {
+                                cue_tokens.insert(user_id,token);
+                                self.spawn_voice_cue(&mut cue_jobs,cue);
+                            }
                         }
                     },
-                    VoiceEvent::AudioFrame{user_id,sample_rate_hz,channels,..}=>{
+                    VoiceEvent::AudioFrame{user_id,sample_rate_hz,channels,vad_active,..}=>{
                         if let Some(capture)=caption_captures.get_mut(&user_id){if capture.cancel.is_cancelled()||!self.caption_allowed_cached(&audio,&user_id)?||sample_rate_hz!=16000||channels!=1||capture.pcm.len()+incoming.payload.len()>16000*2*120 {caption_captures.remove(&user_id);}else{capture.pcm.extend_from_slice(&incoming.payload);}}
-                        if let Some(capture)=captures.get_mut(&user_id){if !capture.cancel.is_cancelled()&&!capture.actor_scope.cancel.is_cancelled()&&audio.is_listen_allowed(&user_id)&&sample_rate_hz==16000&&channels==1&&capture.pcm.len()+incoming.payload.len()<=16000*2*120{capture.pcm.extend(incoming.payload);}else{captures.remove(&user_id);}}
+                        if let Some(capture)=captures.get_mut(&user_id){if !capture.cancel.is_cancelled()&&!capture.actor_scope.cancel.is_cancelled()&&audio.is_listen_allowed(&user_id)&&sample_rate_hz==16000&&channels==1&&capture.pcm.len()+incoming.payload.len()<=16000*2*120{capture.note_voice_activity(vad_active == Some(true),tokio::time::Instant::now());capture.pcm.extend(incoming.payload);}else{captures.remove(&user_id);}}
                         if !captures.contains_key(&user_id)&&!caption_captures.contains_key(&user_id){audio.stream_participant(&user_id,false);}
                     },
                     VoiceEvent::UtteranceFinalized{user_id,..}=>{
@@ -739,21 +830,28 @@ impl Engine {
                         if capture.cancel.is_cancelled()||capture.actor_scope.cancel.is_cancelled(){continue}
                         if transcriptions.len()>=4{self.emit(OverlayEvent::Status{message:"Voice transcription is busy; please try again".into()});continue}
                         let engine=self.clone();
+                        let heard=self.voice_cue(if capture.pcm.len()>=3200 {bumblebee_audio::SignalKey::HeardChirp} else {bumblebee_audio::SignalKey::TimeoutChirp},&capture)?;
                         // Keep the actor lease through capture, transcription and queue submission.
                         transcriptions.spawn(async move{
                             let scope=capture.actor_scope.clone();
                             let voice_cancel=capture.cancel.clone();
+                            if let Err(error)=engine.play_voice_cue(heard).await {engine.emit(OverlayEvent::Status{message:error.to_string()});}
                             let message=tokio::select!{biased;_=scope.cancel.cancelled()=>return Ok(()),result=engine.transcribe_voice(user_id,capture)=>result?};
                             if let Some(message)=message {engine.dispatch_transcription(message,voice_cancel,scope).await} else {Ok(())}
                         });
                     }},
-                    VoiceEvent::ParticipantLeft{user_id}=>{captures.remove(&user_id);caption_captures.remove(&user_id);audio.stream_participant(&user_id,false);self.voice_activity.lock().await.remove(&user_id);if user_id==self.store.settings()?.owner_discord_id{self.clear_streamer_caption()?;}},
-                    VoiceEvent::NoSpeech{user_id,..}=>{captures.remove(&user_id);caption_captures.remove(&user_id);audio.stream_participant(&user_id,false);},
+                    VoiceEvent::ParticipantLeft{user_id}=>{if let Some(cue)=cue_tokens.remove(&user_id){cue.cancel();}self.cancel_actor(&format!("discord:{user_id}")).await;captures.remove(&user_id);caption_captures.remove(&user_id);audio.stream_participant(&user_id,false);self.voice_activity.lock().await.remove(&user_id);if user_id==self.store.settings()?.owner_discord_id{self.clear_streamer_caption()?;}},
+                    VoiceEvent::NoSpeech{user_id,..}=>{voice_turns.remove(&user_id);if let Some(capture)=captures.remove(&user_id){let cue=self.voice_cue(bumblebee_audio::SignalKey::TimeoutChirp,&capture)?;self.spawn_voice_cue(&mut cue_jobs,cue);}caption_captures.remove(&user_id);audio.stream_participant(&user_id,false);},
                     VoiceEvent::SourceDown{..}=>{captures.clear();caption_captures.clear();self.clear_streamer_caption()?;self.voice_activity.lock().await.clear();self.cancel().await;},
                     _=>{}
                 }
             }
         }}Ok(())}.await;
+		for token in cue_tokens.values() {
+			token.cancel();
+		}
+		cue_jobs.abort_all();
+		while cue_jobs.join_next().await.is_some() {}
 		transcriptions.abort_all();
 		while transcriptions.join_next().await.is_some() {}
 		self.clear_streamer_caption()?;
@@ -789,21 +887,16 @@ impl Engine {
 		if cancel.is_cancelled() || !self.voice_agent_enabled(&user_id)? {
 			return Ok(None);
 		}
-		let wav = pcm_wav(&capture.pcm);
-		let part = reqwest::multipart::Part::bytes(wav)
-			.file_name("voice.wav")
-			.mime_str("audio/wav")?;
-		let form = reqwest::multipart::Form::new()
-			.part("file", part)
-			.text("model", "whisper-1")
-			.text("language", "en");
-		let response = tokio::select! {_=cancel.cancelled()=>return Ok(None),r=self.providers.http.post("https://api.openai.com/v1/audio/transcriptions").bearer_auth(self.providers.secret("openai")?).multipart(form).send()=>r?};
-		crate::providers::check_response("openai", &response)?;
-		let body: serde_json::Value =
-			tokio::select! {_=cancel.cancelled()=>return Ok(None),body=response.json()=>body?};
-		let text = body["text"]
-			.as_str()
-			.context("Transcription returned no text")?;
+		let transcription_id = uuid::Uuid::new_v4().to_string();
+		let text = tokio::select! { biased;
+			 _=cancel.cancelled()=>return Ok(None),
+				 text=self.while_voice_processing(transcription_id.clone(),cancel.clone(),self.providers.transcribe_audio(
+						&settings.voice_transcription_model,
+						pcm_wav(&capture.pcm),
+						Some("en"),
+						&cancel,
+				 ))=>text?,
+		};
 		if text.trim().is_empty() || cancel.is_cancelled() {
 			return Ok(None);
 		}
@@ -824,7 +917,7 @@ impl Engine {
 			access: Default::default(),
 			user_id,
 			display_name: capture.username,
-			message_id: uuid::Uuid::new_v4().to_string(),
+			message_id: transcription_id,
 			channel_id: current.discord_text_channel_id,
 			text: text.into(),
 		};

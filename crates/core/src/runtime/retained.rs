@@ -104,6 +104,8 @@ impl Engine {
 			let cue = match self.cue_kind.load(Ordering::SeqCst) {
 				2 => next.thinking_sound_volume,
 				3 => next.chat_tts_waiting_tone_volume,
+				1 => next.wake_chirp_volume * 0.20,
+				4 => next.wake_chirp_volume * 0.32,
 				_ => next.wake_chirp_volume,
 			};
 			audio.set_cue_gain((next.master_volume * cue).clamp(0., 2.))?;

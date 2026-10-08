@@ -34,12 +34,14 @@ pub fn get_signal_audio(
 		anyhow::bail!("signal repeat_count must be at most {MAX_REPEAT_COUNT}");
 	}
 
-	let cache_key = format!(
-		"{signal_key:?}:{:.3}:{}:{}",
-		gain,
-		repeat_count,
-		variant_key.unwrap_or_default()
-	);
+	// A turn key selects one of three sounds, not a unique cached waveform.
+	// Keeping the raw turn ID here would retain a new WAV for every conversation.
+	let variant = if signal_key == SongbirdSignalKey::ThinkingLoop {
+		variant_key.map(hash_variant).unwrap_or(0) % 3
+	} else {
+		0
+	};
+	let cache_key = format!("{signal_key:?}:{gain:.3}:{repeat_count}:{variant}");
 	let cache = SIGNAL_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
 	if let Some(existing) = cache.lock().unwrap().get(&cache_key).cloned() {
 		return Ok(existing);
@@ -51,9 +53,7 @@ pub fn get_signal_audio(
 		SongbirdSignalKey::TimeoutChirp => create_timeout_chirp(),
 		SongbirdSignalKey::CancelChirp => create_cancel_chirp(),
 		SongbirdSignalKey::CallWaiting => create_call_waiting_chime(),
-		SongbirdSignalKey::ThinkingLoop => {
-			create_thinking_loop(variant_key.map(hash_variant).unwrap_or(0) % 3)
-		}
+		SongbirdSignalKey::ThinkingLoop => create_thinking_loop(variant),
 	};
 
 	let mut repeated = Vec::with_capacity(pcm.len() * repeat_count as usize);
@@ -287,5 +287,36 @@ mod tests {
 
 		assert!(peak > 100);
 		assert!(peak < 2_000);
+	}
+
+	#[test]
+	fn many_turn_keys_reuse_only_three_identical_thinking_waveforms() {
+		let mut variants = HashMap::new();
+		for index in 0..100 {
+			let key = format!("conversation-turn-{index}");
+			let variant = hash_variant(&key) % 3;
+			let wav = get_signal_audio(
+				SongbirdSignalKey::ThinkingLoop,
+				Some(1.0),
+				Some(2),
+				Some(&key),
+			)
+			.unwrap();
+			if let Some(previous) = variants.insert(variant, wav.clone()) {
+				assert_eq!(previous, wav);
+			}
+		}
+		assert_eq!(variants.len(), 3);
+		assert_ne!(variants[&0], variants[&1]);
+		assert_ne!(variants[&1], variants[&2]);
+		assert_ne!(variants[&0], variants[&2]);
+		let cache = SIGNAL_CACHE.get().unwrap().lock().unwrap();
+		assert_eq!(
+			cache
+				.keys()
+				.filter(|key| key.starts_with("ThinkingLoop:1.000:2:"))
+				.count(),
+			3
+		);
 	}
 }

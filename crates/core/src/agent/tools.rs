@@ -77,8 +77,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
 		),
 		definition(
 			"progressUpdate",
-			"Send concise meaningful progress only if the original delivery policy permits it. This is not a final result.",
-			vec![("text", string(1000))],
+			"Send concise meaningful progress only if the original delivery policy permits it. For a voice request set spoken=true only when worth saying aloud; false suppresses voice progress. Chat progress stays text. This is not a final result.",
+			vec![("text", string(1000)), ("spoken", boolean())],
 			false,
 			false,
 			true,
@@ -251,6 +251,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 ("openaiReasoningEffort",nullable(enumeration(&["default","none","minimal","low","medium","high","xhigh"]))),
                 ("openaiVoiceReasoningEffort",nullable(enumeration(&["default","none","minimal","low","medium","high","xhigh"]))),
                 ("imageModel",nullable(string(200))),
+                ("voiceTranscriptionModel",nullable(string(200))),
+                ("streamerTranscriptionModel",nullable(string(200))),
                 ("aiWebSearchEnabled",nullable(boolean())),("aiCodeInterpreterEnabled",nullable(boolean())),("aiImageGenerationEnabled",nullable(boolean())),("aiMemoriesEnabled",nullable(boolean())),("aiRemindersEnabled",nullable(boolean())) ,
 			],
 			true,
@@ -435,18 +437,16 @@ pub async fn execute(
 			json!({"status":"configured","delivery":delivery::configure(engine,cp,args).await?})
 		}
 		"progressUpdate" => {
-			let policy = cp.delivery.as_ref().context("Delivery is not configured")?;
-			if !policy.public_progress {
-				json!({"status":"suppressed"})
-			} else {
-				let receipt = engine
-					.send_message(&cp.source, text("text")?)
-					.await
-					.map_err(|_| {
-						platform_tools::UncertainOutcome("Progress delivery outcome is unknown".into())
-					})?;
-				json!({"status":"delivered","messageIds":receipt})
-			}
+			delivery::progress(
+				engine,
+				cp,
+				text("text")?,
+				args["spoken"]
+					.as_bool()
+					.context("spoken must be a boolean")?,
+				cancel,
+			)
+			.await?
 		}
 		"discoverConnectedCapabilities" => {
 			let query = args["query"].as_str().unwrap_or("").to_lowercase();
@@ -559,6 +559,8 @@ pub async fn execute(
 						"openaiReasoningEffort",
 						"openaiVoiceReasoningEffort",
 						"imageModel",
+						"voiceTranscriptionModel",
+						"streamerTranscriptionModel",
 						"aiWebSearchEnabled",
 						"aiCodeInterpreterEnabled",
 						"aiImageGenerationEnabled",

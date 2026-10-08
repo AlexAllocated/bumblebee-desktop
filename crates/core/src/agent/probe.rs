@@ -143,6 +143,11 @@ pub async fn run(providers: Arc<Providers>, model_id: &str) -> Result<ProbeRepor
 		approved_call: None,
 		voice_channel_id: None,
 		owner_context: false,
+		requester_was_owner: Some(true),
+		access_bindings: Default::default(),
+		pending_final: None,
+		failure_final: false,
+		recovery_eligible: true,
 	};
 	host.store().create_turn(
 		&cp.id,

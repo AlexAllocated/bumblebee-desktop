@@ -69,6 +69,7 @@ export interface Settings {
   chatPlatforms: Record<"discord" | "twitch" | "youtube", PlatformPolicy>;
   voiceCaptionsEnabled: boolean;
   streamerTranscriptionModel: string;
+  voiceTranscriptionModel: string;
 }
 export type OverrideChoice = "inherit" | "allow" | "block";
 export interface ChatterOverrides {
@@ -128,11 +129,21 @@ export interface PendingInput {
   ownerRequired: boolean;
   expiresAt: number;
 }
+export interface RecoveryReceipt {
+  status: string;
+  destination: string | null;
+  messageIds: string[];
+  completedParts: number | null;
+  totalParts: number | null;
+  unacknowledgedPartMayHaveSent: boolean | null;
+}
 export interface RecoveryTurn {
   id: string;
   actor: string;
   state: string;
   updatedAt: number;
+  resumable: boolean;
+  receipts: RecoveryReceipt[];
 }
 export interface Memory {
   id: string;
@@ -201,7 +212,7 @@ export type OverlayEvent =
       id: string;
       audio_path: string;
       gain: number;
-      kind: "wake" | "thinking" | "waiting";
+      kind: "wake" | "heard" | "timeout" | "cancel" | "thinking" | "waiting";
       looping: boolean;
       audible: boolean;
     }

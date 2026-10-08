@@ -12,7 +12,9 @@ struct FixtureHost {
 	prompts: Mutex<Vec<ReplyRoute>>,
 	store: Store,
 	responses: Mutex<VecDeque<Value>>,
+	requests: Mutex<Vec<Checkpoint>>,
 	effects: Mutex<Vec<String>>,
+	fail_effect: Mutex<Option<String>>,
 	owner: AtomicBool,
 	delivered: AtomicUsize,
 	cancel_during_effect: AtomicBool,
@@ -26,7 +28,9 @@ impl FixtureHost {
 			prompts: Mutex::new(vec![]),
 			store: Store::open(path).unwrap(),
 			responses: Mutex::new(responses.into()),
+			requests: Mutex::new(vec![]),
 			effects: Mutex::new(vec![]),
+			fail_effect: Mutex::new(None),
 			owner: AtomicBool::new(true),
 			delivered: AtomicUsize::new(0),
 			cancel_during_effect: AtomicBool::new(false),
@@ -87,6 +91,7 @@ impl Host for FixtureHost {
 		_: bool,
 		_: CancellationToken,
 	) -> Result<Value> {
+		self.requests.lock().unwrap().push(cp.clone());
 		if cp.rounds > 2 {
 			assert!(
 				cp.items
@@ -114,6 +119,9 @@ impl Host for FixtureHost {
 			);
 		}
 		self.effects.lock().unwrap().push(call.name.clone());
+		if self.fail_effect.lock().unwrap().as_deref() == Some(call.name.as_str()) {
+			bail!("Observed provider rejection");
+		}
 		if call.name == "ban" && self.cancel_during_effect.load(Ordering::SeqCst) {
 			cancel.cancel();
 			std::future::pending::<()>().await;
@@ -183,6 +191,11 @@ fn checkpoint_source(host: &FixtureHost, input: ChatMessage) -> Checkpoint {
 		approved_call: None,
 		voice_channel_id: None,
 		owner_context: false,
+		requester_was_owner: Some(true),
+		access_bindings: Default::default(),
+		pending_final: None,
+		failure_final: false,
+		recovery_eligible: true,
 	};
 	host
 		.store
@@ -193,6 +206,45 @@ fn checkpoint_source(host: &FixtureHost, input: ChatMessage) -> Checkpoint {
 		)
 		.unwrap();
 	cp
+}
+
+#[tokio::test]
+async fn recoverable_failure_keeps_ordered_results_and_remaining_tools_in_the_parent_turn() {
+	let host = FixtureHost::new(
+		std::path::Path::new(":memory:"),
+		vec![
+			calls(&[("configure", "configureTurnDelivery")]),
+			calls(&[("read-id", "inspect"), ("independent-id", "after")]),
+			terminal("The read failed; the independent action was verified."),
+		],
+	);
+	*host.fail_effect.lock().unwrap() = Some("inspect".into());
+	let mut cp = checkpoint(&host);
+	run_guarded(&host, &mut cp, CancellationToken::new())
+		.await
+		.unwrap();
+	assert_eq!(*host.effects.lock().unwrap(), ["inspect", "after"]);
+	let requests = host.requests.lock().unwrap();
+	assert_eq!(requests.len(), 3);
+	let outputs: Vec<_> = requests[2]
+		.items
+		.iter()
+		.filter(|v| v["type"] == "function_call_output")
+		.collect();
+	assert_eq!(
+		outputs
+			.iter()
+			.map(|v| v["call_id"].as_str().unwrap())
+			.collect::<Vec<_>>(),
+		["configure", "read-id", "independent-id"]
+	);
+	let failed: Value = serde_json::from_str(outputs[1]["output"].as_str().unwrap()).unwrap();
+	let completed: Value = serde_json::from_str(outputs[2]["output"].as_str().unwrap()).unwrap();
+	assert_eq!(failed["untrustedToolResult"]["status"], "failed");
+	assert_eq!(completed["untrustedToolResult"]["status"], "verified");
+	assert!(requests[2].items.iter().any(|v| v["role"] == "user"));
+	assert_eq!(cp.executed, 3);
+	assert_eq!(host.delivered.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -286,7 +338,13 @@ async fn cancellation_after_dispatch_does_not_run_later_calls_or_reissue_unknown
 	assert!(
 		host
 			.store
-			.begin_call(&second.id, "new-model-id", "ban", "{}")
+			.begin_call(
+				&second.id,
+				"new-model-id",
+				"ban",
+				"{}",
+				crate::storage::CallEffect::MayMutate
+			)
 			.is_err()
 	);
 }
@@ -294,6 +352,7 @@ async fn cancellation_after_dispatch_does_not_run_later_calls_or_reissue_unknown
 fn malformed_terminal_or_missing_call_identity_never_gets_a_compatibility_fallback() {
 	for text in [
 		"plain text",
+		r#"{"text":"missing required messages"}"#,
 		r#"{"text":"claimed success","messages":null,"extra":true}"#,
 		r#"{"text":"one","messages":[{"text":"two","artifactIds":[]}]}"#,
 	] {
@@ -310,6 +369,85 @@ fn malformed_terminal_or_missing_call_identity_never_gets_a_compatibility_fallba
 	assert_eq!(
 		model::parse_response(terminal("")).unwrap().2.unwrap().text,
 		""
+	);
+}
+
+#[test]
+fn terminal_envelope_keeps_semantic_artifacts_and_rejects_nested_protocol_only() {
+	let response = |value: Value| json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":value.to_string()}]}]});
+	for raw in [
+		r#"{"spokenSummary":"done","chatResponse":"details"}"#,
+		r#"{"finalResponse":{"text":"done","messages":null}}"#,
+	] {
+		assert!(model::parse_response(response(json!({"text":raw,"messages":null}))).is_err());
+		assert!(
+			model::parse_response(response(
+				json!({"text":raw,"messages":[{"text":raw,"artifactIds":[]}]})
+			))
+			.is_err()
+		);
+	}
+	for raw in [
+		r#"{"finalResponse":"normal application field"}"#,
+		r#"{"spokenSummary":"example value"}"#,
+		"```json\n{\"spokenSummary\":\"example\",\"chatResponse\":\"example\"}\n```",
+	] {
+		assert_eq!(
+			model::parse_response(terminal(raw))
+				.unwrap()
+				.2
+				.unwrap()
+				.text,
+			raw
+		);
+	}
+	let reply = model::parse_response(response(json!({"text":"First image\n\nSecond image","messages":[{"text":"First image","artifactIds":["one"]},{"text":"Second image","artifactIds":["two"]}]}))).unwrap().2.unwrap();
+	let messages = reply.messages.unwrap();
+	assert_eq!(messages[0].artifact_ids, ["one"]);
+	assert_eq!(messages[1].artifact_ids, ["two"]);
+}
+
+#[test]
+fn recovery_read_classification_does_not_treat_local_mutations_as_safe_reads() {
+	use crate::storage::CallEffect;
+	let definitions = tools::definitions();
+	for name in [
+		"listMemories",
+		"discoverConnectedCapabilities",
+		"inspectDiscordResources",
+		"inspectTwitchResources",
+		"inspectYoutubeResources",
+	] {
+		assert_eq!(
+			definitions
+				.iter()
+				.find(|d| d.name == name)
+				.unwrap()
+				.call_effect(),
+			CallEffect::ReadOnly
+		);
+	}
+	for name in [
+		"rememberMemory",
+		"createReminder",
+		"setAiSettings",
+		"setOverlaySettings",
+		"configureTurnDelivery",
+		"progressUpdate",
+		"generateImage",
+	] {
+		assert_eq!(
+			definitions
+				.iter()
+				.find(|d| d.name == name)
+				.unwrap()
+				.call_effect(),
+			CallEffect::MayMutate
+		);
+	}
+	assert_eq!(
+		definition("newFutureTool", false, false).call_effect(),
+		CallEffect::MayMutate
 	);
 }
 #[test]
@@ -385,7 +523,7 @@ async fn cancelled_permission_recheck_does_not_dispatch_or_mark_an_unstarted_act
 	*host.cancel_owner.lock().unwrap() = Some((1, cancel.clone()));
 	assert!(resume(&host, &source("yes"), cancel).await.is_err());
 	assert!(host.effects.lock().unwrap().is_empty());
-	assert_eq!(host.store.turn(&cp.id).unwrap().state, "interrupted");
+	assert_eq!(host.store.turn(&cp.id).unwrap().state, "cancelled");
 	let count: i64 = host
 		.store
 		.db()
@@ -880,6 +1018,11 @@ async fn self_disable_keeps_its_success_receipt_and_stops_later_runtime_boundari
 		approved_call: None,
 		voice_channel_id: None,
 		owner_context: false,
+		requester_was_owner: Some(true),
+		access_bindings: Default::default(),
+		pending_final: None,
+		failure_final: false,
+		recovery_eligible: true,
 	};
 	store
 		.create_turn(
@@ -893,7 +1036,13 @@ async fn self_disable_keeps_its_success_receipt_and_stops_later_runtime_boundari
 		.unwrap_err();
 	assert!(error.to_string().contains("agent is disabled"));
 	let receipt = store
-		.begin_call(&cp.id, &disable.id, &disable.name, &disable.arguments)
+		.begin_call(
+			&cp.id,
+			&disable.id,
+			&disable.name,
+			&disable.arguments,
+			crate::storage::CallEffect::MayMutate,
+		)
 		.unwrap()
 		.unwrap();
 	assert_eq!(

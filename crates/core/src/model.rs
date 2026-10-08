@@ -123,6 +123,7 @@ pub struct Settings {
 	pub chat_platforms: ChatPlatforms,
 	pub voice_captions_enabled: bool,
 	pub streamer_transcription_model: String,
+	pub voice_transcription_model: String,
 }
 impl Default for Settings {
 	fn default() -> Self {
@@ -130,7 +131,7 @@ impl Default for Settings {
 			overlay_port: 2899,
 			azure_region: "eastus".into(),
 			bumblebee_voice: "bumblebee-buddy".into(),
-			openai_model: String::new(),
+			openai_model: "gpt-6-astra".into(),
 			twitch_client_id: String::new(),
 			twitch_channel: String::new(),
 			google_client_id: String::new(),
@@ -171,7 +172,7 @@ impl Default for Settings {
 			openai_voice_model: String::new(),
 			openai_reasoning_effort: "default".into(),
 			openai_voice_reasoning_effort: "default".into(),
-			image_model: "gpt-image-1.5".into(),
+			image_model: "gpt-image-2.5-sunburst".into(),
 			ai_web_search_enabled: false,
 			ai_code_interpreter_enabled: false,
 			ai_image_generation_enabled: false,
@@ -179,7 +180,8 @@ impl Default for Settings {
 			ai_reminders_enabled: true,
 			chat_platforms: ChatPlatforms::default(),
 			voice_captions_enabled: false,
-			streamer_transcription_model: "whisper-1".into(),
+			streamer_transcription_model: "gpt-transcribe".into(),
+			voice_transcription_model: "gpt-transcribe".into(),
 		}
 	}
 }

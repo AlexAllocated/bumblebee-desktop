@@ -264,11 +264,14 @@ impl Settings {
 			&self.openai_voice_model,
 			&self.image_model,
 			&self.streamer_transcription_model,
+			&self.voice_transcription_model,
 		] {
 			ensure!(model_name(model), "Invalid model name");
 		}
 		ensure!(
-			!self.image_model.is_empty() && !self.streamer_transcription_model.is_empty(),
+			!self.image_model.is_empty()
+				&& !self.streamer_transcription_model.is_empty()
+				&& !self.voice_transcription_model.is_empty(),
 			"Image and transcription model names cannot be empty"
 		);
 		for p in [
@@ -418,6 +421,31 @@ mod tests {
 		assert!(original.patched(&json!({"aiEnabled":null})).is_err());
 		assert!(original.patched(&json!({"masterVolume":3})).is_err());
 	}
+	#[test]
+	fn transcription_defaults_preserve_existing_caption_choices_and_validate_new_voice_choice() {
+		let defaults = Settings::default();
+		assert_eq!(defaults.openai_model, "gpt-6-astra");
+		assert!(defaults.openai_voice_model.is_empty());
+		assert_eq!(defaults.image_model, "gpt-image-2.5-sunburst");
+		assert_eq!(defaults.voice_transcription_model, "gpt-transcribe");
+		assert_eq!(defaults.streamer_transcription_model, "gpt-transcribe");
+		let old: Settings = serde_json::from_value(json!({"streamerTranscriptionModel":"whisper-1","openaiModel":"gpt-5.6-sol","imageModel":"gpt-image-2"})).unwrap();
+		assert_eq!(old.openai_model, "gpt-5.6-sol");
+		assert_eq!(old.image_model, "gpt-image-2");
+		assert_eq!(old.streamer_transcription_model, "whisper-1");
+		assert_eq!(old.voice_transcription_model, "gpt-transcribe");
+		let selected = old
+			.patched(&json!({"voiceTranscriptionModel":"gpt-4o-transcribe"}))
+			.unwrap();
+		assert_eq!(selected.voice_transcription_model, "gpt-4o-transcribe");
+		assert_eq!(selected.streamer_transcription_model, "whisper-1");
+		assert!(old.patched(&json!({"voiceTranscriptionModel":""})).is_err());
+		assert!(
+			old.patched(&json!({"voiceTranscriptionModel":"bad model"}))
+				.is_err()
+		);
+	}
+
 	#[test]
 	fn voice_models_and_managed_capabilities_follow_current_settings() {
 		let mut s = Settings {

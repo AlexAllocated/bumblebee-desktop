@@ -262,6 +262,7 @@ fn main() {
 			commands::rotate_overlay_token,
 			commands::quit_app,
 			commands::answer_pending,
+			commands::resume_interrupted,
 			commands::dismiss_interrupted,
 			artifacts::preview_artifact,
 			artifacts::preview_submission,

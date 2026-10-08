@@ -2,6 +2,7 @@
 pub mod discovery;
 pub mod oauth;
 pub mod streaming;
+mod transcription;
 
 use crate::{model::Voice, storage::Store};
 use anyhow::{Context, Result, ensure};
@@ -12,6 +13,31 @@ use std::{
 	time::Duration,
 };
 use tokio::sync::{broadcast, watch};
+
+/// A credential/authorization repair is required before a new request can run.
+/// This is not a provider permission or target error; callers may only suspend
+/// work on it before dispatch, never reinterpret a failed write as retryable.
+#[derive(Debug)]
+pub struct AuthorizationRequired {
+	pub provider: String,
+}
+impl AuthorizationRequired {
+	pub(crate) fn new(provider: &str) -> Self {
+		Self {
+			provider: provider.into(),
+		}
+	}
+}
+impl std::fmt::Display for AuthorizationRequired {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(
+			f,
+			"{} authorization is missing or expired; reconnect in Settings",
+			self.provider
+		)
+	}
+}
+impl std::error::Error for AuthorizationRequired {}
 
 #[derive(Clone)]
 enum EchoOutcome {
@@ -261,7 +287,7 @@ impl Providers {
 			.secrets
 			.get(id)?
 			.filter(|v| !v.trim().is_empty())
-			.context("Missing credentials; configure this provider in Settings")
+			.ok_or_else(|| AuthorizationRequired::new(id).into())
 	}
 	pub async fn refresh_voices(&self) -> Result<Vec<Voice>> {
 		let settings = self.store.settings()?;
@@ -353,8 +379,10 @@ pub fn check_response(provider: &str, response: &reqwest::Response) -> Result<()
 	if code.is_success() {
 		return Ok(());
 	}
+	if code == reqwest::StatusCode::UNAUTHORIZED {
+		return Err(AuthorizationRequired::new(provider).into());
+	}
 	let kind = match code.as_u16() {
-		401 => "Authorization expired or credentials invalid",
 		403 => "Missing provider permissions",
 		429 => "Provider rate limit reached",
 		_ => "Provider request failed",

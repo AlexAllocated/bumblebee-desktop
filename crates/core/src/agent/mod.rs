@@ -1,7 +1,13 @@
 //! One durable tool loop shared by chat and Discord voice.
 mod delivery;
+mod recovery;
+pub(crate) use recovery::{recover_interrupted, recoverable_source};
+mod access;
 mod managed;
 mod model;
+mod receipts;
+pub use receipts::RecoveryReceipt;
+pub(crate) use receipts::{delivery_failure_receipt, send_parts};
 pub mod platform_tools;
 #[cfg(feature = "live-probes")]
 pub mod probe;
@@ -29,6 +35,34 @@ pub struct ToolDefinition {
 	pub external_effect: bool,
 }
 impl ToolDefinition {
+	/// Only audited observations may be deliberately requested again after a
+	/// crashed read. Local writes (memories, reminders, settings) are not reads,
+	/// even when they do not have a remote external_effect.
+	fn call_effect(&self) -> crate::storage::CallEffect {
+		use crate::storage::CallEffect;
+		if !self.external_effect
+			&& matches!(
+				self.name.as_str(),
+				"discoverConnectedCapabilities"
+					| "listMemories"
+					| "listReminders"
+					| "getCurrentSettings"
+					| "getSettingOptions"
+					| "getRuntimeStatus"
+					| "getRecentChatContext"
+					| "getOverlayLayout"
+					| "listChatterProfiles"
+					| "listGeneratedArtifacts"
+					| "resolveUserTarget"
+					| "inspectDiscordResources"
+					| "inspectTwitchResources"
+					| "inspectYoutubeResources"
+			) {
+			CallEffect::ReadOnly
+		} else {
+			CallEffect::MayMutate
+		}
+	}
 	fn wire(&self) -> Value {
 		json!({"type":"function","name":self.name,"description":self.description,"parameters":self.parameters,"strict":true})
 	}
@@ -90,6 +124,16 @@ pub struct Checkpoint {
 	pub voice_channel_id: Option<String>,
 	#[serde(default)]
 	pub owner_context: bool,
+	#[serde(default)]
+	pub requester_was_owner: Option<bool>,
+	#[serde(default)]
+	pub access_bindings: access::AccessBindings,
+	#[serde(default)]
+	pub pending_final: Option<FinalReply>,
+	#[serde(default)]
+	pub failure_final: bool,
+	#[serde(default)]
+	pub recovery_eligible: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -302,7 +346,14 @@ pub async fn run(
 		approved_call: None,
 		voice_channel_id,
 		owner_context,
+		requester_was_owner: Some(verified_owner),
+		access_bindings: Default::default(),
+		pending_final: None,
+		failure_final: false,
+		recovery_eligible: true,
 	};
+	cp.access_bindings = access::AccessBindings::snapshot_source(&settings, &cp.source)?;
+	tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled before binding its source"),result=access::bind_source(&host.engine,&cp.source,&mut cp.access_bindings,&cancel)=>result?};
 	host.store().create_turn(
 		&cp.id,
 		&durable::actor(&cp.source),
@@ -331,7 +382,7 @@ fn context_memories(
 }
 fn require_context_owner(cp: &Checkpoint, owner: bool) -> Result<()> {
 	ensure!(
-		!cp.owner_context || owner,
+		!(cp.owner_context || cp.requester_was_owner.unwrap_or(true)) || owner,
 		"Owner identity changed; private owner context cannot continue under this identity"
 	);
 	Ok(())
@@ -363,6 +414,26 @@ trait Host: Sync {
 	}
 	fn store(&self) -> &Store;
 	fn definitions(&self) -> Vec<ToolDefinition>;
+	fn validate_checkpoint(
+		&self,
+		_cp: &Checkpoint,
+		_cancel: &CancellationToken,
+	) -> impl Future<Output = Result<()>> + Send {
+		async { Ok(()) }
+	}
+
+	fn catalog(&self) -> Vec<ToolDefinition> {
+		self.definitions()
+	}
+	fn preflight(
+		&self,
+		_cp: &mut Checkpoint,
+		_call: &ToolCall,
+		_args: &Value,
+		_cancel: &CancellationToken,
+	) -> impl Future<Output = Result<Option<access::AccessBlocker>>> + Send {
+		async { Ok(None) }
+	}
 	fn owner(&self, source: &ChatMessage) -> impl Future<Output = Result<bool>> + Send;
 	fn request(
 		&self,
@@ -391,6 +462,43 @@ trait Host: Sync {
 		cancel: CancellationToken,
 	) -> impl Future<Output = Result<Value>> + Send;
 }
+/// Nonverbal processing audio follows spoken delivery, not public text progress.
+/// Before classification only a wake-triggered voice request gets neutral feedback.
+pub(crate) fn with_thinking_feedback<'a, T: 'a, F>(
+	engine: &'a Engine,
+	source: &'a ChatMessage,
+	delivery: Option<&'a Delivery>,
+	variant: String,
+	cancel: CancellationToken,
+	failure_cue: bool,
+	request: F,
+) -> impl Future<Output = Result<T>> + 'a
+where
+	F: Future<Output = Result<T>> + 'a,
+{
+	// The real tool executor sits below queue, turn and cue futures. Heap-own
+	// its state once so each orchestration layer does not copy it into its poll
+	// frame; the full queue must fit Tokio's ordinary worker stack.
+	let request = Box::pin(request);
+	async move {
+		let private_dm = source.platform == "discord"
+			&& source.channel_id != engine.store.settings()?.discord_text_channel_id;
+		let enabled = !private_dm
+			&& delivery
+				.map(|d| d.speech && d.targets.iter().any(|target| target == "source"))
+				.unwrap_or(source.platform == "discord_voice");
+		if failure_cue && source.platform == "discord_voice" && enabled {
+			engine
+				.while_voice_processing(variant, cancel, request)
+				.await
+		} else {
+			engine
+				.while_thinking(enabled, variant, cancel, request)
+				.await
+		}
+	}
+}
+
 struct RuntimeHost {
 	engine: Arc<Engine>,
 }
@@ -404,11 +512,38 @@ impl RuntimeHost {
 	}
 }
 impl Host for RuntimeHost {
+	async fn validate_checkpoint(&self, cp: &Checkpoint, cancel: &CancellationToken) -> Result<()> {
+		access::verify_bound_source(&self.engine, &cp.source, &cp.access_bindings, cancel).await?;
+		self.require_enabled()
+	}
+
 	async fn reply_route(&self, cp: &Checkpoint, owner: bool) -> Result<ReplyRoute> {
 		self.require_enabled()?;
 		require_context_owner(cp, self.owner(&cp.source).await?)?;
 		delivery::reply_route(&self.engine, cp, owner).await
 	}
+	fn catalog(&self) -> Vec<ToolDefinition> {
+		tools::definitions()
+	}
+	async fn preflight(
+		&self,
+		cp: &mut Checkpoint,
+		call: &ToolCall,
+		args: &Value,
+		cancel: &CancellationToken,
+	) -> Result<Option<access::AccessBlocker>> {
+		self.require_enabled()?;
+		access::inspect(
+			&self.engine,
+			&cp.source,
+			&call.name,
+			args,
+			&mut cp.access_bindings,
+			cancel,
+		)
+		.await
+	}
+
 	fn store(&self) -> &Store {
 		&self.engine.store
 	}
@@ -453,17 +588,18 @@ impl Host for RuntimeHost {
 		validate_voice_context(&self.engine, cp).await?;
 		let owner = self.owner(&cp.source).await?;
 		require_context_owner(cp, owner)?;
+		self.validate_checkpoint(cp, &cancel).await?;
 		self.require_enabled()?;
-		self
-			.engine
-			.while_thinking(
-				cp.delivery
-					.as_ref()
-					.is_some_and(|d| d.speech && d.public_progress),
-				cancel.clone(),
-				model::request(&self.engine, cp, defs, owner, cancel),
-			)
-			.await
+		with_thinking_feedback(
+			&self.engine,
+			&cp.source,
+			cp.delivery.as_ref(),
+			cp.id.clone(),
+			cancel.clone(),
+			true,
+			model::request(&self.engine, cp, defs, owner, cancel),
+		)
+		.await
 	}
 	async fn execute(
 		&self,
@@ -476,8 +612,38 @@ impl Host for RuntimeHost {
 		validate_voice_context(&self.engine, cp).await?;
 		let owner = self.owner(&cp.source).await?;
 		require_context_owner(cp, owner)?;
+		self.validate_checkpoint(cp, &cancel).await?;
 		self.require_enabled()?;
-		tools::execute(&self.engine, cp, call, args, cancel).await
+		// Progress is itself user-facing playback, not background tool work.
+		if call.name == "progressUpdate" {
+			return tools::execute(&self.engine, cp, call, args, cancel).await;
+		}
+		let source = cp.source.clone();
+		// Classification is already known when this tool is dispatched. Honor a
+		// silent/private proposal immediately, including its DM creation request.
+		let delivery = if call.name == "configureTurnDelivery" {
+			Some(
+				serde_json::from_value::<Delivery>(args.clone()).unwrap_or(Delivery {
+					speech: false,
+					public_progress: false,
+					targets: vec![],
+					discord_dm_user_id: None,
+					dm_channel: None,
+				}),
+			)
+		} else {
+			cp.delivery.clone()
+		};
+		with_thinking_feedback(
+			&self.engine,
+			&source,
+			delivery.as_ref(),
+			cp.id.clone(),
+			cancel.clone(),
+			false,
+			tools::execute(&self.engine, cp, call, args, cancel),
+		)
+		.await
 	}
 	async fn prompt(
 		&self,
@@ -487,6 +653,7 @@ impl Host for RuntimeHost {
 	) -> Result<()> {
 		self.require_enabled()?;
 		require_context_owner(cp, self.owner(&cp.source).await?)?;
+		self.validate_checkpoint(cp, &cancel).await?;
 		delivery::prompt(&self.engine, cp, pending, cancel).await
 	}
 	async fn finish(
@@ -499,6 +666,7 @@ impl Host for RuntimeHost {
 		validate_voice_context(&self.engine, cp).await?;
 		let owner = self.owner(&cp.source).await?;
 		require_context_owner(cp, owner)?;
+		self.validate_checkpoint(cp, &cancel).await?;
 		self.require_enabled()?;
 		delivery::finish(&self.engine, cp, reply, cancel).await
 	}
@@ -557,6 +725,16 @@ async fn resume<H: Host>(
 		host.store().settings()?.ai_enabled,
 		"Enable the agent to answer this pending request"
 	);
+	cp.source.access = if !is_desktop_answer(message)
+		&& durable::actor(message) == durable::actor(&cp.source)
+		&& durable::channel(message) == durable::channel(&cp.source)
+	{
+		message.access.clone()
+	} else {
+		Default::default()
+	};
+	cp.source.is_owner = false;
+	tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled before continuing"),result=host.validate_checkpoint(&cp,&cancel)=>result?};
 	let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
 	require_context_owner(&cp, owner)?;
 	ensure!(
@@ -615,7 +793,11 @@ async fn resume<H: Host>(
 			.context("Choose one of the saved choices, or use cancel")?
 			.clone()
 	};
-	cp.answer = Some(resolved.clone());
+	cp.answer = if pending.kind == "access" {
+		None
+	} else {
+		Some(resolved.clone())
+	};
 	if pending.kind == "confirmation" && resolved == "yes" {
 		cp.approved_call = cp.calls.get(cp.cursor).map(|c| c.id.clone());
 	}
@@ -684,7 +866,7 @@ async fn run_guarded<H: Host>(
 			host.store().checkpoint_turn(
 				&cp.id,
 				if cancel.is_cancelled() {
-					"interrupted"
+					"cancelled"
 				} else {
 					"failed"
 				},
@@ -694,12 +876,75 @@ async fn run_guarded<H: Host>(
 	}
 	result
 }
+fn suspend_access<H: Host>(
+	host: &H,
+	cp: &mut Checkpoint,
+	blocker: access::AccessBlocker,
+	owner_required: bool,
+) -> Result<()> {
+	let pending = PendingInput {
+		id: uuid::Uuid::new_v4().simple().to_string()[..8].into(),
+		turn_id: cp.id.clone(),
+		actor: durable::actor(&cp.source),
+		channel: durable::channel(&cp.source),
+		kind: "access".into(),
+		prompt: blocker.prompt,
+		choices: vec!["continue".into(), "cancel".into()],
+		owner_required,
+		expires_at: crate::now_ms() + 86_400_000,
+	};
+	cp.reply_route = Some(ReplyRoute::Dashboard);
+	cp.pending = Some(pending.clone());
+	host
+		.store()
+		.suspend_turn(&pending, &serde_json::to_value(&cp)?)
+}
+async fn owner_before_dispatch<H: Host>(
+	host: &H,
+	cp: &mut Checkpoint,
+	cancel: &CancellationToken,
+) -> Result<Option<bool>> {
+	let result = async {
+		let owner = host.owner(&cp.source).await?;
+		require_context_owner(cp, owner)?;
+		host.validate_checkpoint(cp, cancel).await?;
+		Ok::<_, anyhow::Error>(owner)
+	};
+	match tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=result=>result}
+	{
+		Ok(owner) => Ok(Some(owner)),
+		Err(error)
+			if error
+				.downcast_ref::<crate::providers::AuthorizationRequired>()
+				.is_some() =>
+		{
+			ensure!(
+				!cancel.is_cancelled(),
+				"Request cancelled during authorization check"
+			);
+			suspend_access(
+				host,
+				cp,
+				access::AccessBlocker::repair(error.to_string()),
+				cp.requester_was_owner.unwrap_or(true),
+			)?;
+			Ok(None)
+		}
+		Err(error) => Err(error),
+	}
+}
 async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken) -> Result<()> {
 	loop {
 		ensure!(!cancel.is_cancelled(), "Request cancelled");
+		if cp.pending_final.is_some() {
+			return deliver_final(host, cp, cancel.clone()).await;
+		}
 		if cp.cursor < cp.calls.len() {
 			let call = cp.calls[cp.cursor].clone();
-			let defs = host.definitions();
+			if recovery::apply_saved_call(host, cp, &call)? {
+				continue;
+			}
+			let defs = host.catalog();
 			let def = defs
 				.iter()
 				.find(|d| d.name == call.name)
@@ -711,13 +956,24 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 				cp.delivery.is_some() || call.name == "configureTurnDelivery",
 				"Delivery must be configured before executing actions"
 			);
-			let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
+
+			let Some(owner) = owner_before_dispatch(host, cp, &cancel).await? else {
+				return Ok(());
+			};
 			require_context_owner(cp, owner)?;
 			ensure!(
 				!cancel.is_cancelled(),
 				"Request cancelled after permission check"
 			);
 			let denied = def.owner_only && !owner;
+			if !denied && !(def.requires_confirmation && cp.answer.as_deref() == Some("no")) {
+				if let Some(blocker) = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled"),result=host.preflight(cp,&call,&args,&cancel)=>result?}
+				{
+					suspend_access(host, cp, blocker, def.owner_only)?;
+					return Ok(());
+				}
+				checkpoint(host, cp, "running")?;
+			}
 			if !denied
 				&& ((def.requires_confirmation
 					&& cp.approved_call.as_deref() != Some(&call.id)
@@ -779,9 +1035,13 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 				"This request reached its tool execution limit"
 			);
 			ensure!(!cancel.is_cancelled(), "Request cancelled before dispatch");
-			let cached = host
-				.store()
-				.begin_call(&cp.id, &call.id, &call.name, &call.arguments)?;
+			let cached = host.store().begin_call(
+				&cp.id,
+				&call.id,
+				&call.name,
+				&call.arguments,
+				def.call_effect(),
+			)?;
 			let output = if let Some(result) = cached {
 				serde_json::from_str(&result).context("Saved tool result was invalid")?
 			} else {
@@ -799,10 +1059,10 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 					tokio::select! {
 						 biased;
 						 _=cancel.cancelled()=>{
-							  if def.external_effect{host.store().mark_call_uncertain(&cp.id,&call.id)?;}else{host.store().finish_call(&cp.id,&call.id,&json!({"status":"cancelled"}).to_string())?;}
+							  if def.call_effect()==crate::storage::CallEffect::MayMutate{host.store().mark_call_uncertain(&cp.id,&call.id)?;}else{host.store().finish_call(&cp.id,&call.id,&json!({"status":"cancelled"}).to_string())?;}
 							  bail!("Request cancelled; an in-flight external action may have an unknown outcome")
 						 },
-						 result=host.execute(cp,&call,&args,cancel.clone())=>result,
+						 result=Box::pin(host.execute(cp,&call,&args,cancel.clone()))=>result,
 					}
 				};
 				let output = match result {
@@ -814,7 +1074,12 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 					{
 						json!({"status":"unknown","error":error.to_string()})
 					}
-					Err(error) => json!({"status":"failed","error":error.to_string()}),
+					Err(error) => match delivery_failure_receipt(&error) {
+						Some(receipt) => {
+							json!({"status":if receipt["status"]=="failed"{"failed"}else{"unknown"},"receipt":receipt,"error":error.to_string()})
+						}
+						None => json!({"status":"failed","error":error.to_string()}),
+					},
 				};
 				if output["status"] == "unknown" {
 					host
@@ -836,7 +1101,9 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 			continue;
 		}
 		ensure!(cp.rounds < 24, "This request reached its model round limit");
-		let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
+		let Some(owner) = owner_before_dispatch(host, cp, &cancel).await? else {
+			return Ok(());
+		};
 		require_context_owner(cp, owner)?;
 		ensure!(
 			!cancel.is_cancelled(),
@@ -850,10 +1117,25 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 		cp.rounds += 1;
 		checkpoint(host, cp, "running")?;
 		let response = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled"),response=host.request(cp,&defs,owner,cancel.clone())=>response?};
-		let (items, calls, reply) = model::parse_response(response)?;
+		let (items, calls, reply) = match model::parse_response(response) {
+			Ok(parsed) => parsed,
+			Err(error)
+				if cp.delivery.is_some()
+					&& error
+						.downcast_ref::<model::InvalidFinalResponse>()
+						.is_some() =>
+			{
+				cp.pending_final = Some(model::safe_failure_reply());
+				cp.failure_final = true;
+				checkpoint(host, cp, "running")?;
+				continue;
+			}
+			Err(error) => return Err(error),
+		};
 		cp.items.extend(items);
 		cp.calls = calls;
 		cp.cursor = 0;
+		cp.pending_final = reply;
 		checkpoint(host, cp, "running")?;
 		if !cp.calls.is_empty() {
 			continue;
@@ -862,34 +1144,66 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 			cp.delivery.is_some(),
 			"Model finished without configuring delivery"
 		);
-		let reply = reply.context("Model did not return a terminal response")?;
 		ensure!(
-			!cancel.is_cancelled(),
-			"Request cancelled before final delivery"
+			cp.pending_final.is_some(),
+			"Model did not return a terminal response"
 		);
-		checkpoint(host, cp, "delivering")?;
-		let result = tokio::select! {biased;_=cancel.cancelled()=>Err(anyhow::anyhow!("Final delivery interrupted; it will not be repeated automatically")),result=host.finish(cp,&reply,cancel.clone())=>result};
-		match result {
-			Ok(receipts) => {
+	}
+}
+
+async fn deliver_final<H: Host>(
+	host: &H,
+	cp: &mut Checkpoint,
+	cancel: CancellationToken,
+) -> Result<()> {
+	let reply = cp
+		.pending_final
+		.clone()
+		.context("Saved final response is missing")?;
+	ensure!(cp.delivery.is_some(), "Delivery is not configured");
+	ensure!(
+		!cancel.is_cancelled(),
+		"Request cancelled before final delivery"
+	);
+	let Some(owner) = owner_before_dispatch(host, cp, &cancel).await? else {
+		return Ok(());
+	};
+	require_context_owner(cp, owner)?;
+	checkpoint(host, cp, "delivering")?;
+	let result = tokio::select! {biased;_=cancel.cancelled()=>Err(anyhow::anyhow!("Final delivery interrupted; it will not be repeated automatically")),result=host.finish(cp,&reply,cancel.clone())=>result};
+	match result {
+		Ok(receipts) => {
+			if !cp.failure_final {
 				host.store().append_history(
 					&durable::conversation_scope(&cp.source),
 					"assistant",
 					&reply.text,
 				)?;
-				let mut final_checkpoint = serde_json::to_value(&cp)?;
-				final_checkpoint["deliveryReceipts"] = receipts;
-				host
-					.store()
-					.checkpoint_turn(&cp.id, "completed", &final_checkpoint)?;
-				return Ok(());
 			}
-			Err(error) => {
-				checkpoint(host, cp, "unknown")?;
-				return Err(error);
+			let mut saved = serde_json::to_value(&cp)?;
+			saved["deliveryReceipts"] = receipts;
+			host.store().checkpoint_turn(
+				&cp.id,
+				if cp.failure_final {
+					"failed"
+				} else {
+					"completed"
+				},
+				&saved,
+			)?;
+			Ok(())
+		}
+		Err(error) => {
+			let mut saved = serde_json::to_value(&cp)?;
+			if let Some(receipt) = delivery_failure_receipt(&error) {
+				saved["partialDelivery"] = receipt;
 			}
+			host.store().checkpoint_turn(&cp.id, "unknown", &saved)?;
+			Err(error)
 		}
 	}
 }
+
 fn checkpoint<H: Host>(host: &H, cp: &Checkpoint, state: &str) -> Result<()> {
 	let value = serde_json::to_value(cp)?;
 	ensure!(
@@ -945,3 +1259,6 @@ pub async fn reminder_loop(engine: Arc<Engine>, cancel: CancellationToken) {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dispatch_tests;

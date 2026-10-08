@@ -1,3 +1,4 @@
+use super::receipts::{DeliveryFailure, RejectedDelivery, delivery_failure_receipt, send_parts};
 use super::{
 	Artifact, Checkpoint, Delivery, FinalReply, ReplyRoute, platform_tools::UncertainOutcome,
 };
@@ -9,6 +10,84 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgressRoute {
+	Suppressed,
+	Chat,
+	Speech,
+}
+
+fn progress_route(source: &ChatMessage, policy: &Delivery, spoken: bool) -> ProgressRoute {
+	if !policy.public_progress || !policy.targets.iter().any(|target| target == "source") {
+		ProgressRoute::Suppressed
+	} else if source.platform == "discord_voice" {
+		if policy.speech && spoken {
+			ProgressRoute::Speech
+		} else {
+			ProgressRoute::Suppressed
+		}
+	} else {
+		ProgressRoute::Chat
+	}
+}
+
+pub(super) async fn progress(
+	engine: &Engine,
+	cp: &Checkpoint,
+	text: &str,
+	spoken: bool,
+	cancel: CancellationToken,
+) -> Result<Value> {
+	let policy = cp.delivery.as_ref().context("Delivery is not configured")?;
+	perform_progress(
+		progress_route(&cp.source, policy, spoken),
+		cancel.clone(),
+		engine.send_message(&cp.source, text),
+		engine.speak(text, None, cancel),
+	)
+	.await
+}
+
+// Both futures remain lazy: a suppressed/private update cannot touch either
+// destination. Keep the receipt in the normal call ledger, including uncertainty.
+async fn perform_progress<C, S>(
+	route: ProgressRoute,
+	cancel: CancellationToken,
+	chat: C,
+	speech: S,
+) -> Result<Value>
+where
+	C: std::future::Future<Output = Result<Vec<String>>>,
+	S: std::future::Future<Output = Result<()>>,
+{
+	ensure!(!cancel.is_cancelled(), "Progress cancelled before delivery");
+	match route {
+		ProgressRoute::Suppressed => Ok(json!({"status":"suppressed"})),
+		ProgressRoute::Chat => {
+			let receipt = chat.await.map_err(|error| {
+				if delivery_failure_receipt(&error).is_some() {
+					error
+				} else {
+					UncertainOutcome(
+						"Progress delivery outcome is unknown; inspect chat before retrying".into(),
+					)
+					.into()
+				}
+			})?;
+			ensure!(!cancel.is_cancelled(), "Progress cancelled during delivery");
+			Ok(json!({"status":"delivered","messageIds":receipt}))
+		}
+		ProgressRoute::Speech => {
+			speech.await.map_err(|_| UncertainOutcome("Spoken progress was not completely acknowledged; it will not be repeated automatically".into()))?;
+			ensure!(
+				!cancel.is_cancelled(),
+				"Spoken progress cancelled during playback"
+			);
+			Ok(json!({"status":"spoken"}))
+		}
+	}
+}
 
 pub struct Upload {
 	pub filename: String,
@@ -222,31 +301,60 @@ pub async fn finish(
 		if group.text.is_empty() && group.artifact_ids.is_empty() {
 			continue;
 		}
-		let uploads = load_uploads(engine, cp, &group.artifact_ids).await?;
+		let uploads = load_uploads(engine, cp, &group.artifact_ids)
+			.await
+			.map_err(|error| final_delivery_failure(&receipts, error))?;
 		for target in &policy.targets {
-			let receipt = match target.as_str() {
-				"source" => send_source(engine, &cp.source, &group.text, &uploads).await?,
-				"discord_dm" => {
-					send_discord(
-						engine,
-						policy
-							.dm_channel
-							.as_deref()
-							.context("Private destination is unavailable")?,
-						&group.text,
-						&uploads,
-					)
-					.await?
-				}
-				_ => anyhow::bail!("Unknown final destination"),
-			};
+			if target == "source" && !source_needs_text(&cp.source, policy, !uploads.is_empty()) {
+				continue;
+			}
+			let sent: Result<Value> = async {
+				Ok(match target.as_str() {
+					"source" => send_source(engine, &cp.source, &group.text, &uploads).await?,
+					"discord_dm" => {
+						send_discord(
+							engine,
+							policy
+								.dm_channel
+								.as_deref()
+								.context("Private destination is unavailable")?,
+							&group.text,
+							&uploads,
+						)
+						.await?
+					}
+					_ => anyhow::bail!("Unknown final destination"),
+				})
+			}
+			.await;
+			let receipt = sent.map_err(|error| final_delivery_failure(&receipts, error))?;
 			receipts.push(json!({"target":target,"receipt":receipt}));
 		}
 		if policy.speech && !group.text.is_empty() {
-			engine.speak(&group.text, None, cancel.clone()).await?;
+			engine
+				.speak(&group.text, None, cancel.clone())
+				.await
+				.map_err(|error| final_delivery_failure(&receipts, error))?;
 		}
 	}
 	Ok(json!({"status":"delivered","receipts":receipts}))
+}
+
+fn final_delivery_failure(completed: &[Value], error: anyhow::Error) -> anyhow::Error {
+	if completed.is_empty() {
+		return error;
+	}
+	let failed = delivery_failure_receipt(&error).unwrap_or_else(|| json!({"status":"unknown"}));
+	DeliveryFailure {
+		receipt: json!({"status":"partial","completedDeliveries":completed,"failedDelivery":failed}),
+	}
+	.into()
+}
+
+fn source_needs_text(source: &ChatMessage, policy: &Delivery, has_artifacts: bool) -> bool {
+	// Voice already delivers its text aloud. Only explicitly grouped files need
+	// the associated text channel; a separate deliverMessage remains explicit.
+	source.platform != "discord_voice" || !policy.speech || has_artifacts
 }
 
 pub async fn deliver(engine: &Engine, cp: &Checkpoint, args: &Value) -> Result<Value> {
@@ -309,7 +417,7 @@ pub async fn deliver(engine: &Engine, cp: &Checkpoint, args: &Value) -> Result<V
 			let mut source = cp.source.clone();
 			source.platform = target.into();
 			source.channel_id = channel.into();
-			json!({"messageIds":engine.send_message(&source,text).await.map_err(|_|UncertainOutcome("Message delivery did not return a complete receipt; inspect chat before retrying".into()))?})
+			json!({"messageIds":engine.send_message(&source,text).await?})
 		}
 		_ => anyhow::bail!("Unknown delivery target"),
 	};
@@ -339,9 +447,7 @@ async fn send_source(
 		);
 		return send_discord(engine, &source.channel_id, text, uploads).await;
 	}
-	Ok(
-		json!({"messageIds":engine.send_message(source,text).await.map_err(|_|UncertainOutcome("Message delivery did not return a complete receipt; inspect chat before retrying".into()))?}),
-	)
+	Ok(json!({"messageIds":engine.send_message(source,text).await?}))
 }
 
 pub async fn create_dm(engine: &Engine, recipient: &str) -> Result<String> {
@@ -404,69 +510,84 @@ async fn send_discord(
 	} else {
 		split_message(text, 1900)
 	};
-	let mut ids = Vec::new();
-	for (part_number, part) in parts.iter().enumerate() {
-		let mut body = json!({"content":part,"allowed_mentions":{"parse":[]}});
-		let mut request = engine
-			.providers
-			.http
-			.post(format!(
-				"https://discord.com/api/v10/channels/{channel}/messages"
-			))
-			.header(reqwest::header::AUTHORIZATION, format!("Bot {token}"));
-		if part_number == 0 && !uploads.is_empty() {
-			body["attachments"] = json!(
-				uploads
-					.iter()
-					.enumerate()
-					.map(|(i, u)| json!({"id":i,"filename":u.filename}))
-					.collect::<Vec<_>>()
+	let token = token.as_str();
+	let ids = send_parts(
+		&format!("discord:{channel}"),
+		&parts,
+		|part_number, part| async move {
+			let mut body = json!({"content":part,"allowed_mentions":{"parse":[]}});
+			let mut request = engine
+				.providers
+				.http
+				.post(format!(
+					"https://discord.com/api/v10/channels/{channel}/messages"
+				))
+				.header(reqwest::header::AUTHORIZATION, format!("Bot {token}"));
+			if part_number == 0 && !uploads.is_empty() {
+				body["attachments"] = json!(
+					uploads
+						.iter()
+						.enumerate()
+						.map(|(i, u)| json!({"id":i,"filename":u.filename}))
+						.collect::<Vec<_>>()
+				);
+				let mut form = reqwest::multipart::Form::new().text("payload_json", body.to_string());
+				for (index, upload) in uploads.iter().enumerate() {
+					ensure!(
+						upload.bytes.len() <= 8 * 1024 * 1024,
+						"Attachment exceeds the 8 MiB delivery limit; open it in the desktop dashboard"
+					);
+					form = form.part(
+						format!("files[{index}]"),
+						reqwest::multipart::Part::bytes(upload.bytes.clone())
+							.file_name(upload.filename.clone())
+							.mime_str(&upload.media_type)?,
+					);
+				}
+				request = request.multipart(form);
+			} else {
+				request = request.json(&body);
+			}
+			let response = request.send().await.map_err(|_| {
+				UncertainOutcome(
+					"Discord message outcome is unknown; inspect the destination before retrying".into(),
+				)
+			})?;
+			discord_message_receipt(response).await
+		},
+	)
+	.await?;
+	Ok(
+		json!({"channelId":channel,"messageIds":ids,"completedParts":parts.len(),"totalParts":parts.len()}),
+	)
+}
+
+async fn discord_message_receipt(response: reqwest::Response) -> Result<String> {
+	if !response.status().is_success() {
+		let code = response.status().as_u16();
+		if code >= 500 || code == 408 {
+			return Err(
+				UncertainOutcome(format!(
+					"Discord delivery was uncertain (HTTP {code}); inspect before retrying"
+				))
+				.into(),
 			);
-			let mut form = reqwest::multipart::Form::new().text("payload_json", body.to_string());
-			for (index, upload) in uploads.iter().enumerate() {
-				ensure!(
-					upload.bytes.len() <= 8 * 1024 * 1024,
-					"Attachment exceeds the 8 MiB delivery limit; open it in the desktop dashboard"
-				);
-				form = form.part(
-					format!("files[{index}]"),
-					reqwest::multipart::Part::bytes(upload.bytes.clone())
-						.file_name(upload.filename.clone())
-						.mime_str(&upload.media_type)?,
-				);
-			}
-			request = request.multipart(form);
-		} else {
-			request = request.json(&body);
 		}
-		let response = request.send().await.map_err(|_| {
-			UncertainOutcome(
-				"Discord message outcome is unknown; inspect the destination before retrying".into(),
-			)
-		})?;
-		if !response.status().is_success() {
-			let code = response.status().as_u16();
-			if !ids.is_empty() || code >= 500 || code == 408 {
-				return Err(UncertainOutcome(format!("Discord delivery was partial or uncertain (HTTP {code}); inspect the destination before retrying")).into());
-			}
-			crate::providers::check_response("discord", &response)?;
-		}
-		let response: Value = response.json().await.map_err(|_| {
-			UncertainOutcome("Discord acknowledged the message but its receipt was unreadable".into())
-		})?;
-		ids.push(
-			response["id"]
-				.as_str()
-				.context("Discord receipt has no message ID")
-				.map_err(|_| {
-					UncertainOutcome(
-						"Discord acknowledged delivery without an identifiable message receipt".into(),
-					)
-				})?
-				.to_owned(),
-		);
+		return Err(RejectedDelivery.into());
 	}
-	Ok(json!({"channelId":channel,"messageIds":ids}))
+	let response: Value = response.json().await.map_err(|_| {
+		UncertainOutcome("Discord acknowledged the message but its receipt was unreadable".into())
+	})?;
+	response["id"]
+		.as_str()
+		.filter(|id| !id.is_empty())
+		.map(str::to_owned)
+		.ok_or_else(|| {
+			UncertainOutcome(
+				"Discord acknowledged delivery without an identifiable message receipt".into(),
+			)
+			.into()
+		})
 }
 
 async fn load_uploads(engine: &Engine, cp: &Checkpoint, ids: &[String]) -> Result<Vec<Upload>> {
@@ -514,6 +635,8 @@ pub async fn load_artifact(engine: &Engine, artifact: &Artifact) -> Result<Uploa
 #[cfg(test)]
 mod routing_tests {
 	use super::*;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 	fn source(platform: &str) -> ChatMessage {
 		ChatMessage {
 			platform: platform.into(),
@@ -534,6 +657,199 @@ mod routing_tests {
 			discord_dm_user_id: Some("777".into()),
 			dm_channel: Some("88".into()),
 		}
+	}
+	#[tokio::test]
+	async fn actual_http_partial_delivery_retains_ids_and_does_not_retry_failed_parts() {
+		for (responses, expected_ids, status, may_have_sent) in [
+			(
+				vec![
+					(200, r#"{"id":"first-id"}"#),
+					(403, r#"{"error":"denied"}"#),
+				],
+				vec!["first-id"],
+				"partial",
+				false,
+			),
+			(
+				vec![(403, r#"{"error":"denied"}"#)],
+				vec![],
+				"failed",
+				false,
+			),
+			(
+				vec![(200, r#"{"id":"first-id"}"#), (200, "{invalid")],
+				vec!["first-id"],
+				"partial",
+				true,
+			),
+			(vec![(200, r#"{"id":""}"#)], vec![], "unknown", true),
+		] {
+			let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let url = format!("http://{}/message", listener.local_addr().unwrap());
+			let expected_attempts = responses.len();
+			let server = tokio::spawn(async move {
+				for (code, body) in responses {
+					let (mut socket, _) = listener.accept().await.unwrap();
+					let mut request = vec![0; 8192];
+					assert!(socket.read(&mut request).await.unwrap() > 0);
+					tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+					let response = format!(
+						"HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+						body.len()
+					);
+					socket.write_all(response.as_bytes()).await.unwrap();
+				}
+			});
+			let client = reqwest::Client::builder()
+				.timeout(std::time::Duration::from_secs(2))
+				.build()
+				.unwrap();
+			let attempts = AtomicUsize::new(0);
+			let result = send_parts(
+				"discord:channel",
+				&["one".into(), "two".into(), "three".into()],
+				|_, part| {
+					attempts.fetch_add(1, Ordering::SeqCst);
+					let request = client.post(&url).body(part);
+					async move { discord_message_receipt(request.send().await?).await }
+				},
+			)
+			.await;
+			tokio::time::timeout(std::time::Duration::from_secs(3), server)
+				.await
+				.unwrap()
+				.unwrap();
+			let receipt = delivery_failure_receipt(&result.unwrap_err()).unwrap();
+			assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
+			assert_eq!(receipt["messageIds"], json!(expected_ids));
+			assert_eq!(receipt["status"], status);
+			assert_eq!(receipt["completedParts"], expected_ids.len());
+			assert_eq!(receipt["totalParts"], 3);
+			assert_eq!(receipt["unacknowledgedPartMayHaveSent"], may_have_sent);
+		}
+	}
+	#[test]
+	fn failed_later_destination_retains_prior_delivery_and_partial_message_receipts() {
+		let completed = vec![json!({"target":"discord_dm","receipt":{"messageIds":["private-id"]}})];
+		let failure = DeliveryFailure {
+			receipt: json!({"destination":"discord:room","status":"partial","messageIds":["public-first"],"completedParts":1,"totalParts":2}),
+		};
+		let error = final_delivery_failure(&completed, failure.into());
+		let receipt = delivery_failure_receipt(&error).unwrap();
+		assert_eq!(receipt["completedDeliveries"], json!(completed));
+		assert_eq!(
+			receipt["failedDelivery"]["messageIds"],
+			json!(["public-first"])
+		);
+		assert_eq!(receipt["status"], "partial");
+	}
+	#[tokio::test]
+	async fn voice_progress_requires_all_three_grants_and_never_posts_to_text_chat() {
+		for public in [false, true] {
+			for speech in [false, true] {
+				for spoken in [false, true] {
+					let policy = Delivery {
+						speech,
+						public_progress: public,
+						targets: vec!["source".into()],
+						discord_dm_user_id: None,
+						dm_channel: None,
+					};
+					let route = progress_route(&source("discord_voice"), &policy, spoken);
+					let spoken_calls = AtomicUsize::new(0);
+					let result = perform_progress(
+						route,
+						CancellationToken::new(),
+						async {
+							panic!("Voice progress must not leak into the associated text channel");
+							#[allow(unreachable_code)]
+							Ok(vec![])
+						},
+						async {
+							spoken_calls.fetch_add(1, Ordering::SeqCst);
+							Ok(())
+						},
+					)
+					.await
+					.unwrap();
+					let expected = public && speech && spoken;
+					assert_eq!(spoken_calls.load(Ordering::SeqCst), usize::from(expected));
+					assert_eq!(
+						result["status"],
+						if expected { "spoken" } else { "suppressed" }
+					);
+				}
+			}
+		}
+	}
+	#[tokio::test]
+	async fn chat_progress_keeps_receipt_and_private_or_cancelled_progress_has_no_effect() {
+		let policy = Delivery {
+			speech: false,
+			public_progress: true,
+			targets: vec!["source".into()],
+			discord_dm_user_id: None,
+			dm_channel: None,
+		};
+		let route = progress_route(&source("twitch"), &policy, true);
+		let result = perform_progress(
+			route,
+			CancellationToken::new(),
+			async { Ok(vec!["receipt".into()]) },
+			async { panic!("Text progress must not speak") },
+		)
+		.await
+		.unwrap();
+		assert_eq!(result["messageIds"], json!(["receipt"]));
+		let mut private_policy = private();
+		private_policy.speech = true;
+		private_policy.public_progress = true; // Even an inconsistent checkpoint must keep a private target closed.
+		let route = progress_route(&source("discord_voice"), &private_policy, true);
+		let result = perform_progress(
+			route,
+			CancellationToken::new(),
+			async { panic!("Private text leaked") },
+			async { panic!("Private speech leaked") },
+		)
+		.await
+		.unwrap();
+		assert_eq!(result["status"], "suppressed");
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		assert!(
+			perform_progress(
+				ProgressRoute::Chat,
+				cancel,
+				async { panic!("Cancelled text dispatched") },
+				async { panic!("Cancelled speech dispatched") }
+			)
+			.await
+			.is_err()
+		);
+		let error = perform_progress(
+			ProgressRoute::Chat,
+			CancellationToken::new(),
+			async { anyhow::bail!("partial send") },
+			async { Ok(()) },
+		)
+		.await
+		.unwrap_err();
+		assert!(error.downcast_ref::<UncertainOutcome>().is_some());
+	}
+	#[test]
+	fn spoken_final_does_not_duplicate_text_but_keeps_artifact_and_silent_delivery() {
+		let mut policy = Delivery {
+			speech: true,
+			public_progress: false,
+			targets: vec!["source".into()],
+			discord_dm_user_id: None,
+			dm_channel: None,
+		};
+		assert!(!source_needs_text(&source("discord_voice"), &policy, false));
+		assert!(source_needs_text(&source("discord_voice"), &policy, true));
+		assert!(source_needs_text(&source("discord"), &policy, false));
+		policy.speech = false;
+		assert!(source_needs_text(&source("discord_voice"), &policy, false));
 	}
 	#[test]
 	fn final_third_party_recipient_never_inherits_prompt_authority() {

@@ -24,11 +24,12 @@ export function signalGain(
   if (muted || (mix ? mix.output !== "overlay" : !signal.audible)) return 0;
   const gain = mix
     ? mix.masterVolume *
-      (signal.kind === "wake"
-        ? mix.wakeChirpVolume
-        : signal.kind === "thinking"
-          ? mix.thinkingSoundVolume
-          : mix.chatTtsWaitingToneVolume)
+      (signal.kind === "thinking"
+        ? mix.thinkingSoundVolume
+        : signal.kind === "waiting"
+          ? mix.chatTtsWaitingToneVolume
+          : mix.wakeChirpVolume *
+            (signal.kind === "wake" ? 0.2 : signal.kind === "heard" ? 0.32 : 1))
     : signal.gain;
   return Number.isFinite(gain) ? Math.max(0, Math.min(2, gain)) : 0;
 }

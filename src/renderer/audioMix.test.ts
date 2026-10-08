@@ -54,3 +54,27 @@ test("active cue gains follow their own live settings and stop doubling the mast
   expect(signalGain({ ...cue, kind: "waiting" }, mix, false)).toBe(0.4);
   expect(signalGain(cue, { ...mix, output: "discord" }, false)).toBe(0);
 });
+
+test("wake and heard keep their intrinsic ducking when a live settings event replaces their mixed gain", () => {
+  const gains = { wake: 0.05, heard: 0.08, timeout: 0.25, cancel: 0.25 };
+  for (const [kind, gain] of Object.entries(gains)) {
+    const cue: Extract<OverlayEvent, { type: "signal" }> = {
+      type: "signal",
+      id: kind,
+      audio_path: `${kind}.wav`,
+      kind: kind as keyof typeof gains,
+      looping: false,
+      audible: true,
+      gain,
+    };
+    // Initial event gain is already mixed; receiving the same live settings
+    // must not make the cue louder or apply its ducking coefficient twice.
+    expect(signalGain(cue, null, false)).toBeCloseTo(gain);
+    expect(signalGain(cue, mix, false)).toBeCloseTo(gain);
+    expect(signalGain(cue, { ...mix, wakeChirpVolume: 1 }, false)).toBeCloseTo(
+      gain * 2,
+    );
+    expect(signalGain(cue, { ...mix, output: "discord" }, false)).toBe(0);
+    expect(signalGain(cue, mix, true)).toBe(0);
+  }
+});

@@ -189,6 +189,7 @@ fn reset_patch(scope: ResetScope) -> serde_json::Value {
 		"openaiVoiceReasoningEffort",
 		"imageModel",
 		"streamerTranscriptionModel",
+		"voiceTranscriptionModel",
 		"aiWebSearchEnabled",
 		"aiCodeInterpreterEnabled",
 		"aiImageGenerationEnabled",

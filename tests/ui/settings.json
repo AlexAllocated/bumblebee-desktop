@@ -2,7 +2,7 @@
   "overlayPort": 2899,
   "azureRegion": "eastus",
   "bumblebeeVoice": "bumblebee-buddy",
-  "openaiModel": "gpt-5.4-mini",
+  "openaiModel": "gpt-6-astra",
   "twitchClientId": "",
   "twitchChannel": "example_streamer",
   "googleClientId": "",
@@ -43,7 +43,7 @@
   "openaiVoiceModel": "",
   "openaiReasoningEffort": "default",
   "openaiVoiceReasoningEffort": "default",
-  "imageModel": "gpt-image-1.5",
+  "imageModel": "gpt-image-2.5-sunburst",
   "aiWebSearchEnabled": false,
   "aiCodeInterpreterEnabled": false,
   "aiImageGenerationEnabled": false,
@@ -122,6 +122,6 @@
   "voiceCaptionRoleIds": [],
   "voiceCaptionAllowedUserIds": [],
   "voiceCaptionBlockedUserIds": [],
-  "guestTranscriptionModel": "whisper-1",
-  "streamerTranscriptionModel": "whisper-1"
+  "streamerTranscriptionModel": "gpt-transcribe",
+  "voiceTranscriptionModel": "gpt-transcribe"
 }

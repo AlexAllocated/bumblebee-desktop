@@ -1,4 +1,4 @@
-use super::{Providers, check_response};
+use super::{AuthorizationRequired, Providers, check_response};
 use crate::now_ms;
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -334,10 +334,9 @@ impl Providers {
 		} else {
 			settings.google_client_id
 		};
-		ensure!(
-			tokens.client_id == configured,
-			"Application Client ID changed; reconnect this account"
-		);
+		if tokens.client_id != configured {
+			return Err(AuthorizationRequired::new(provider).into());
+		}
 		if tokens.expires_at > now_ms() + 60_000 {
 			if !tokens.validated {
 				let expected = tokens.account_id.clone();
@@ -350,10 +349,9 @@ impl Providers {
 			}
 			return Ok(tokens);
 		}
-		ensure!(
-			!tokens.refresh_token.is_empty(),
-			"Authorization expired; reconnect this account"
-		);
+		if tokens.refresh_token.is_empty() {
+			return Err(AuthorizationRequired::new(provider).into());
+		}
 		let response = endpoint.refresh(provider, &tokens).await?;
 		let mut renewed = response.into_tokens(tokens.client_id.clone());
 		if renewed.refresh_token.is_empty() {
@@ -410,12 +408,12 @@ impl Providers {
 			.iter()
 			.filter_map(|v| v.as_str().map(str::to_owned))
 			.collect();
-		ensure!(
-			TWITCH_SCOPES
-				.split_whitespace()
-				.all(|scope| tokens.scopes.iter().any(|s| s == scope)),
-			"Missing Twitch chat permissions; reconnect"
-		);
+		if !TWITCH_SCOPES
+			.split_whitespace()
+			.all(|scope| tokens.scopes.iter().any(|s| s == scope))
+		{
+			return Err(AuthorizationRequired::new("twitch").into());
+		}
 		tokens.validated = true;
 		Ok(())
 	}
@@ -483,13 +481,38 @@ impl TokenEndpoint for LiveTokenEndpoint<'_> {
 			"https://oauth2.googleapis.com/token"
 		};
 		let response = self.0.http.post(url).form(&form).send().await?;
-		check_response(provider, &response)?;
-		let response: TokenResponse = response.json().await?;
-		Ok(response)
+		read_refresh_response(provider, response).await
 	}
 	async fn validate(&self, provider: &str, tokens: &mut Tokens) -> Result<()> {
 		self.0.validate_identity(provider, tokens).await
 	}
+}
+
+/// OAuth token endpoints have explicit, documented rejected-refresh responses.
+/// Only those auth failures permit a pre-dispatch reconnect continuation. Do not
+/// classify arbitrary provider 400/403/404 bodies, outages, or write responses.
+async fn read_refresh_response(
+	provider: &str,
+	response: reqwest::Response,
+) -> Result<TokenResponse> {
+	let status = response.status();
+	if status == reqwest::StatusCode::BAD_REQUEST {
+		let body: serde_json::Value = response.json().await?;
+		let rejected = match provider {
+			"google" => matches!(
+				body["error"].as_str(),
+				Some("invalid_grant" | "invalid_client")
+			),
+			"twitch" => body["status"] == 400 && body["message"] == "Invalid refresh token",
+			_ => false,
+		};
+		if rejected {
+			return Err(AuthorizationRequired::new(provider).into());
+		}
+		anyhow::bail!("{provider}: token refresh failed (HTTP 400)");
+	}
+	check_response(provider, &response)?;
+	Ok(response.json().await?)
 }
 
 async fn google_callback(listener: TcpListener, expected_state: &str) -> Result<String> {
@@ -744,6 +767,101 @@ mod tests {
 	}
 	fn saved(providers: &Providers) -> Tokens {
 		serde_json::from_str(&providers.secret("twitch_tokens").unwrap()).unwrap()
+	}
+	#[tokio::test]
+	async fn expired_authorization_without_refresh_is_typed_and_never_contacts_endpoint() {
+		let (_dir, providers) = fixture();
+		let mut tokens = saved(&providers);
+		tokens.refresh_token.clear();
+		providers.save_tokens("twitch", &tokens).unwrap();
+		let endpoint = FakeEndpoint::new();
+		let error = providers
+			.tokens_with("twitch", &endpoint)
+			.await
+			.err()
+			.unwrap();
+		assert!(error.downcast_ref::<AuthorizationRequired>().is_some());
+		assert_eq!(
+			endpoint.renewals.load(std::sync::atomic::Ordering::SeqCst),
+			0
+		);
+		assert_eq!(
+			endpoint
+				.validations
+				.load(std::sync::atomic::Ordering::SeqCst),
+			0
+		);
+	}
+	#[tokio::test]
+	async fn refresh_repair_classification_uses_documented_auth_rejection_not_generic_http_errors() {
+		for (provider, status, body, repair) in [
+			(
+				"google",
+				400,
+				serde_json::json!({"error":"invalid_grant"}),
+				true,
+			),
+			(
+				"google",
+				400,
+				serde_json::json!({"error":"invalid_client"}),
+				true,
+			),
+			(
+				"twitch",
+				400,
+				serde_json::json!({"status":400,"message":"Invalid refresh token"}),
+				true,
+			),
+			("twitch", 401, serde_json::json!({}), true),
+			(
+				"google",
+				403,
+				serde_json::json!({"error":"invalid_grant"}),
+				false,
+			),
+			(
+				"google",
+				404,
+				serde_json::json!({"error":"invalid_grant"}),
+				false,
+			),
+			(
+				"google",
+				500,
+				serde_json::json!({"error":"invalid_grant"}),
+				false,
+			),
+			(
+				"google",
+				400,
+				serde_json::json!({"error":"invalid_request"}),
+				false,
+			),
+			(
+				"twitch",
+				400,
+				serde_json::json!({"status":400,"message":"Malformed request"}),
+				false,
+			),
+		] {
+			let response = reqwest::Response::from(
+				axum::http::Response::builder()
+					.status(status)
+					.body(body.to_string())
+					.unwrap(),
+			);
+			let error = read_refresh_response(provider, response)
+				.await
+				.err()
+				.unwrap();
+			assert_eq!(
+				error.downcast_ref::<AuthorizationRequired>().is_some(),
+				repair,
+				"{provider} HTTP {status}"
+			);
+			assert!(!error.to_string().contains("invalid_grant"));
+		}
 	}
 	#[tokio::test]
 	async fn rotated_token_survives_validation_outage_but_is_not_trusted() {

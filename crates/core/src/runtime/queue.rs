@@ -54,8 +54,12 @@ impl WorkScopes {
 	}
 }
 
+pub(super) enum AgentInput {
+	Message(ChatMessage),
+	Recovery { turn_id: String },
+}
 pub(super) struct AgentJob {
-	pub message: ChatMessage,
+	pub input: AgentInput,
 	pub scope: Arc<ActorScope>,
 }
 
@@ -64,7 +68,7 @@ pub(super) async fn run_agent_queue<F, Fut>(
 	session: CancellationToken,
 	mut run: F,
 ) where
-	F: FnMut(ChatMessage, CancellationToken) -> Fut,
+	F: FnMut(AgentInput, CancellationToken) -> Fut,
 	Fut: Future<Output = ()>,
 {
 	loop {
@@ -72,10 +76,19 @@ pub(super) async fn run_agent_queue<F, Fut>(
 		let Some(job) = job else { break };
 		// Keep the lease alive during execution so actor cancellation covers active and queued work.
 		let scope = job.scope;
-		if scope.cancel.is_cancelled() {
+		if scope.cancel.is_cancelled() && matches!(job.input, AgentInput::Message(_)) {
 			continue;
 		}
-		run(job.message, scope.cancel.child_token()).await;
+		run(job.input, scope.cancel.child_token()).await;
+	}
+	// Recovery jobs are durable: explicit session cancellation must not leave
+	// their queued records eligible for the next process to resurrect.
+	while let Ok(job) = receiver.try_recv() {
+		if matches!(job.input, AgentInput::Recovery { .. }) {
+			let cancelled = CancellationToken::new();
+			cancelled.cancel();
+			run(job.input, cancelled).await;
+		}
 	}
 }
 
@@ -107,7 +120,7 @@ mod tests {
 			("queued-bob", "bob"),
 		] {
 			tx.send(AgentJob {
-				message: message(id, actor),
+				input: AgentInput::Message(message(id, actor)),
 				scope: scopes.lease(actor),
 			})
 			.await
@@ -120,7 +133,10 @@ mod tests {
 			let executions = executions.clone();
 			let started = started.clone();
 			let finished = finished.clone();
-			move |message, cancel| {
+			move |input, cancel| {
+				let AgentInput::Message(message) = input else {
+					panic!("Unexpected recovery")
+				};
 				let executions = executions.clone();
 				let started = started.clone();
 				let finished = finished.clone();
@@ -143,7 +159,7 @@ mod tests {
 			scopes.cancel_all(&session);
 		}
 		tx.send(AgentJob {
-			message: message("fresh", "alice"),
+			input: AgentInput::Message(message("fresh", "alice")),
 			scope: scopes.lease("alice"),
 		})
 		.await
@@ -174,7 +190,7 @@ mod tests {
 		let mut scopes = WorkScopes::new(&session);
 		let (tx, rx) = mpsc::channel(1);
 		tx.send(AgentJob {
-			message: message("old", "alice"),
+			input: AgentInput::Message(message("old", "alice")),
 			scope: scopes.lease("alice"),
 		})
 		.await

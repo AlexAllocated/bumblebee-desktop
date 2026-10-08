@@ -39,6 +39,27 @@ pub struct RecoveryTurn {
 	actor: String,
 	state: String,
 	updated_at: i64,
+	resumable: bool,
+	receipts: Vec<bumblebee_core::agent::RecoveryReceipt>,
+}
+
+fn recovery_turns(store: &bumblebee_core::storage::Store) -> CommandResult<Vec<RecoveryTurn>> {
+	store
+		.interrupted_turns()
+		.map_err(err)?
+		.into_iter()
+		.map(|turn| {
+			let receipts = store.interruption_receipts(&turn.id).map_err(err)?;
+			Ok(RecoveryTurn {
+				id: turn.id,
+				actor: turn.actor,
+				state: turn.state,
+				updated_at: turn.updated_at,
+				resumable: turn.resumable,
+				receipts,
+			})
+		})
+		.collect()
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,18 +76,7 @@ pub async fn get_activity(state: State<'_, Arc<Runtime>>) -> CommandResult<Activ
 	tokio::task::spawn_blocking(move || {
 		Ok(Activity {
 			pending_inputs: state.store.pending_inputs().map_err(err)?,
-			interrupted_turns: state
-				.store
-				.interrupted_turns()
-				.map_err(err)?
-				.into_iter()
-				.map(|t| RecoveryTurn {
-					id: t.id,
-					actor: t.actor,
-					state: t.state,
-					updated_at: t.updated_at,
-				})
-				.collect(),
+			interrupted_turns: recovery_turns(&state.store)?,
 			pending_images: state.store.pending_images().map_err(err)?,
 			active: state.engine.is_active(),
 			artifacts: crate::artifacts::list(&state).map_err(err)?,
@@ -100,18 +110,7 @@ pub async fn get_snapshot(state: State<'_, Arc<Runtime>>) -> CommandResult<Snaps
 				}
 			}
 		}
-		let interrupted_turns = state
-			.store
-			.interrupted_turns()
-			.map_err(err)?
-			.into_iter()
-			.map(|t| RecoveryTurn {
-				id: t.id,
-				actor: t.actor,
-				state: t.state,
-				updated_at: t.updated_at,
-			})
-			.collect();
+		let interrupted_turns = recovery_turns(&state.store)?;
 		Ok(Snapshot {
 			overlay_settings: state
 				.store
@@ -471,6 +470,10 @@ pub async fn answer_pending(
 	let message =
 		bumblebee_core::agent::desktop_answer_message(&state.store, &id, &answer).map_err(err)?;
 	state.engine.handle_chat(message).await.map_err(err)
+}
+#[tauri::command]
+pub async fn resume_interrupted(state: State<'_, Arc<Runtime>>, id: String) -> CommandResult<()> {
+	state.engine.resume_interrupted(&id).await.map_err(err)
 }
 #[tauri::command]
 pub async fn dismiss_interrupted(state: State<'_, Arc<Runtime>>, id: String) -> CommandResult<()> {

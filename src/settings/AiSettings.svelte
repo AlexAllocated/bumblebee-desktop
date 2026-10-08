@@ -125,17 +125,28 @@
   </fieldset>
   <fieldset disabled={busy}>
     <legend>Voice transcription</legend>
-    <p>Choose the speech-to-text model for your Discord voice captions.</p>
+    <p>
+      Choose the speech-to-text models for conversations and your separate
+      caption bubble.
+    </p>
+    <label
+      >Voice conversation transcription model<input
+        list={`${id}-models`}
+        bind:value={settings.voiceTranscriptionModel}
+        placeholder="gpt-transcribe"
+      /></label
+    >
     <label
       >Streamer transcription model<input
         list={`${id}-models`}
         bind:value={settings.streamerTranscriptionModel}
-        placeholder="whisper-1"
+        placeholder="gpt-transcribe"
       /></label
     >
     <p>
-      These models transcribe voice input. Bumblebee's spoken output uses the
-      voice selected in Audio.
+      Your OpenAI project must have access to the selected models. These models
+      transcribe voice input. Bumblebee's spoken output uses the voice selected
+      in Audio.
     </p>
   </fieldset>
   <fieldset disabled={busy}>
