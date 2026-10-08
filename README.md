@@ -2,16 +2,18 @@
 
 Bumblebee is a streaming companion with a voice, a personality, and a puppet for every chatter. This is the standalone desktop successor to Bumblebee's hosted service: a Rust application with a Svelte interface, packaged with Tauri for Windows and Linux.
 
-**Development preview:** the desktop rewrite is being integrated and tested. See [verification status](docs/verification.md) for what has actually passed. An installer build is not evidence of a complete streaming session.
+**Development preview:** [download v0.1.0-preview.1](https://github.com/AlexAllocated/bumblebee-desktop/releases/tag/v0.1.0-preview.1) for Windows or Linux. Installers are unsigned. See [verification status](docs/verification.md) for the installed-package checks and remaining live-session testing limits.
 
 ## Using Bumblebee
 
-The intended installation flow is:
+To get started:
 
 1. Download an installer from [Releases](https://github.com/AlexAllocated/bumblebee-desktop/releases). Preview installers are unsigned; compare their SHA-256 checksum with the release's checksum file.
 2. Open Settings and configure only the providers you want to use. Azure Speech supplies voices, OpenAI supplies the agent and transcription, and Twitch, YouTube, and Discord connect your communities. Each integration uses your own credentials or application registration.
 3. Authorize Twitch or YouTube in your system browser. Discord requires your own bot application and bot token; Bumblebee does not automate a personal Discord account.
 4. Add the local overlay URL shown in Bumblebee to an OBS browser source, then start a session.
+
+NixOS users should follow the [pinned AppImage wrapper instructions](docs/packaging.md#nixos-installation).
 
 Provider services can charge for use. Bumblebee has no hosted account, subscription, or bundled provider credentials. You do not need Docker, a database server, or a JavaScript runtime to run a packaged installer. Closing the window during an active session keeps Bumblebee in the tray; Quit stops the session.
 

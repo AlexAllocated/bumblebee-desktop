@@ -24,19 +24,27 @@ The renderer build is also used by the local OBS server during desktop developme
 
 ## NixOS installation
 
-After a preview has been published, pin its AppImage URL and SHA-256 in your Nix configuration:
+Add the preview's repository tag to your flake inputs:
+
+```nix
+inputs.bumblebee-desktop.url = "github:AlexAllocated/bumblebee-desktop/v0.1.0-preview.1";
+```
+
+Then pin its AppImage URL and SHA-256 in your Nix configuration:
 
 ```nix
 let
   bumblebee = inputs.bumblebee-desktop.lib.packageAppImage {
-    version = "0.1.0";
-    url = "https://github.com/AlexAllocated/bumblebee-desktop/releases/download/v0.1.0/Bumblebee_0.1.0_amd64.AppImage";
-    sha256 = "REPLACE_WITH_RELEASE_HASH";
+    version = "0.1.0-preview.1";
+    url = "https://github.com/AlexAllocated/bumblebee-desktop/releases/download/v0.1.0-preview.1/Bumblebee_0.1.0_amd64.AppImage";
+    sha256 = "b25f636be0ed4bcf1b60399fd1c38f81d73c8b0d92eb93cd56efd3af9732064e";
   };
 in { environment.systemPackages = [ bumblebee ]; }
 ```
 
-Use the actual release asset filename. This example does not claim that the release exists yet. The wrapper includes the Bumblebee application-menu entry and icon as well as its executable. Enable a Secret Service implementation such as GNOME Keyring in your desktop session, and a StatusNotifier tray to retain access while streaming with the window closed.
+These values identify the published unsigned preview. The wrapper includes the Bumblebee application-menu entry and icon as well as its executable. Enable a Secret Service implementation such as GNOME Keyring in your desktop session, and a StatusNotifier tray to retain access while streaming with the window closed.
+
+The Nix wrapper extracts the AppImage into the immutable Nix store. Tauri currently warns that `APPDIR` is set outside a temporary `.mount_` directory; its detection assumes a FUSE-mounted AppImage. The installed checks exercise the extracted package's actual resources and native libraries. The wrapper also clears inherited GIO module overrides so newer host GLib modules are not loaded into the AppImage's bundled GLib.
 
 ## Installation and upgrade checks
 
