@@ -70,6 +70,7 @@ jobs:
       - name: Check native behavior
         run: cargo test --workspace --locked
       - name: Build installers
+        id: installers
         run: bun tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Install and smoke-test Linux package
         if: runner.os == 'Linux'
@@ -120,8 +121,12 @@ jobs:
           if (-not $finished) { throw 'Installed application smoke test timed out after two minutes' }
           if ($smoke.ExitCode -ne 0) { throw "Installed application smoke test failed: $($smoke.ExitCode)" }
       - name: Collect artifacts and checksums
+        # Retain built installers for diagnosis if a subsequent installed check fails.
+        # The failed check still fails the job; artifacts are not published releases.
+        if: ${{ !cancelled() && steps.installers.outcome == 'success' }}
         run: python scripts/collect-installers.py target/${{ matrix.target }}/release/bundle release-artifacts
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.installers.outcome == 'success' }}
         with:
           name: bumblebee-${{ matrix.target }}-unsigned
           path: release-artifacts/
