@@ -644,8 +644,8 @@ impl Store {
 			let identity = uncertain_identity(name, &serde_json::from_str(&args)?);
 			// These two creations are owned by the originating requester. A lost
 			// receipt for Alice's memory/reminder cannot be Bob's repeated effect.
-			// Exact-ID edits, shared settings, delivery and platform writes remain
-			// global: another actor must not bypass an unresolved shared action.
+			// Exact-ID edits, shared settings, explicit delivery and platform writes
+			// remain global: another actor must not bypass an unresolved shared action.
 			let actor: Option<String> = if matches!(name, "rememberMemory" | "createReminder") {
 				Some(
 					tx.query_row("SELECT actor FROM agent_turns WHERE id=?", [turn], |r| {
@@ -655,11 +655,19 @@ impl Store {
 			} else {
 				None
 			};
+			// Policy, progress and question receipts belong to one request.
+			// Their common arguments must not poison unrelated future requests,
+			// but changing a call ID within this request still cannot replay them.
+			let turn_scope = matches!(
+				name,
+				"configureTurnDelivery" | "progressUpdate" | "requestUserInput"
+			)
+			.then_some(turn);
 			let mut query = tx.prepare(
-				"SELECT c.args FROM tool_calls c LEFT JOIN agent_turns t ON t.id=c.turn_id WHERE c.name=? AND c.state IN ('started','unknown') AND (? IS NULL OR t.actor=? OR t.actor IS NULL)",
+				"SELECT c.args FROM tool_calls c LEFT JOIN agent_turns t ON t.id=c.turn_id WHERE c.name=?1 AND c.state IN ('started','unknown') AND (?2 IS NULL OR t.actor=?2 OR t.actor IS NULL) AND (?3 IS NULL OR c.turn_id=?3)",
 			)?;
 			let prior = query
-				.query_map(params![name, actor, actor], |r| r.get::<_, String>(0))?
+				.query_map(params![name, actor, turn_scope], |r| r.get::<_, String>(0))?
 				.collect::<rusqlite::Result<Vec<_>>>()?;
 			let uncertain = prior.iter().any(|old| {
 				serde_json::from_str::<serde_json::Value>(old)
@@ -1083,6 +1091,91 @@ mod tests {
 			)
 			.is_err()
 		);
+	}
+
+	#[test]
+	fn interrupted_turn_controls_do_not_poison_fresh_requests_or_weaken_same_turn_guards() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("app.db");
+		let controls = [
+			(
+				"configureTurnDelivery",
+				r#"{"speech":true,"publicProgress":true,"targets":["source"],"discordDmUserId":null}"#,
+			),
+			(
+				"progressUpdate",
+				r#"{"text":"Checking those settings now.","spoken":true}"#,
+			),
+			(
+				"requestUserInput",
+				r#"{"question":"Which option?","choices":["Blue","Red"]}"#,
+			),
+		];
+		let mutations = [
+			("banDiscordUser", r#"{"guildId":"1","userId":"2"}"#),
+			("setAiSettings", r#"{"enabled":false}"#),
+		];
+		{
+			let s = Store::open(&path).unwrap();
+			s.create_turn("interrupted", "discord:alice", &serde_json::json!({}))
+				.unwrap();
+			for (name, args) in controls.iter().chain(mutations.iter()) {
+				s.begin_call("interrupted", name, name, args, CallEffect::MayMutate)
+					.unwrap();
+			}
+			// Abrupt termination: calls were dispatched but their receipts are absent.
+		}
+		let s = Store::open(&path).unwrap();
+		s.recover_interrupted().unwrap();
+		s.checkpoint_turn("interrupted", "running", &serde_json::json!({}))
+			.unwrap();
+		for (name, args) in controls {
+			assert!(
+				s.begin_call("interrupted", name, name, args, CallEffect::MayMutate)
+					.is_err()
+			);
+			assert!(
+				s.begin_call(
+					"interrupted",
+					"changed-call-id",
+					name,
+					args,
+					CallEffect::MayMutate
+				)
+				.is_err()
+			);
+		}
+		s.cancel_agent_turn("interrupted").unwrap();
+		for (id, actor) in [
+			("fresh-owner", "discord:alice"),
+			("fresh-viewer", "discord:bob"),
+		] {
+			s.create_turn(id, actor, &serde_json::json!({})).unwrap();
+			for (name, args) in controls {
+				assert!(
+					s.begin_call(id, name, name, args, CallEffect::MayMutate)
+						.unwrap()
+						.is_none()
+				);
+				s.finish_call(id, name, r#"{"status":"observed"}"#).unwrap();
+			}
+			for (name, args) in mutations {
+				assert!(
+					s.begin_call(id, name, name, args, CallEffect::MayMutate)
+						.is_err(),
+					"unresolved shared mutation {name} must remain blocked"
+				);
+			}
+		}
+		for (name, args) in controls {
+			assert_eq!(
+				s.saved_call("interrupted", name, name, args)
+					.unwrap()
+					.unwrap()
+					.0,
+				"unknown"
+			);
+		}
 	}
 	#[test]
 	fn uncertain_requester_owned_creations_do_not_poison_other_requesters_or_weaken_shared_writes() {
