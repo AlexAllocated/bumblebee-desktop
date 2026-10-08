@@ -49,6 +49,7 @@ struct BbKeywordRecognizer {
   std::future<std::shared_ptr<KeywordRecognitionResult>> future;
   std::mutex mutex;
   bool closed = false;
+  std::string terminal_error;
 };
 
 struct BbAudioFrontend {
@@ -60,6 +61,7 @@ struct BbAudioFrontend {
 int32_t ensure_keyword_future(BbKeywordRecognizer* handle) {
   if (!handle) return fail("keyword recognizer handle is null");
   if (handle->closed) return fail("keyword recognizer is closed");
+  if (!handle->terminal_error.empty()) return fail(handle->terminal_error, -2);
   if (!handle->future.valid()) {
     handle->future = handle->recognizer->RecognizeOnceAsync(handle->model);
   }
@@ -110,6 +112,7 @@ extern "C" int32_t bb_keyword_write(void* handle_ptr, const uint8_t* data, uint3
   try {
     std::lock_guard<std::mutex> lock(handle->mutex);
     if (handle->closed) return fail("keyword recognizer is closed");
+    if (!handle->terminal_error.empty()) return fail(handle->terminal_error, -2);
     handle->stream->Write(const_cast<uint8_t*>(data), len);
     g_last_error.clear();
     return 0;
@@ -162,6 +165,12 @@ extern "C" int32_t bb_keyword_poll(void* handle_ptr,
       } else {
         set_last_error("Keyword recognition canceled.");
       }
+      // Cancellation is terminal for this handle. A fresh request here (or
+      // in a later poll after future.get()) can hang SDK teardown when the
+      // original failure was a missing native extension. Preserve the first
+      // diagnostic and let the owner dispose of the failed recognizer.
+      handle->terminal_error = g_last_error;
+      return -2;
     } else {
       g_last_error.clear();
     }
