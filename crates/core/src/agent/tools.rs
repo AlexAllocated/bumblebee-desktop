@@ -224,24 +224,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
 			false,
 			false,
 		),
-		definition(
-			"setOverlaySettings",
-			"Patch the shared preview/OBS layout. Use null to leave a field unchanged; positions and scales are normalized fractions.",
-			vec![
-				("beeX", nullable(number(0., 1.))),
-				("beeY", nullable(number(0., 1.))),
-				("beeScale", nullable(number(0.05, 0.8))),
-				("beeVisible", nullable(boolean())),
-				("puppetScale", nullable(number(0.05, 0.8))),
-				("puppetHorizontal", nullable(number(0., 1.))),
-				("puppetOcclusion", nullable(number(0.1, 1.))),
-				("puppetsVisible", nullable(boolean())),
-				("bubblesVisible", nullable(boolean())),
-			],
-			true,
-			false,
-			false,
-		),
+        ToolDefinition { name:"setOverlaySettings".into(), description:"Patch retained preview/OBS widgets. Null leaves a field unchanged. Positions are 0–100 percent; sizes are fractions. Hidden controls never enable voice capture or permissions.".into(), parameters:crate::overlay::patch_schema(),owner_only:true,requires_confirmation:false,external_effect:false },
 		definition(
 			"setBumblebeeVoice",
 			"Select one of Bumblebee's own curated voice IDs. Chatter voice customization is separate.",
@@ -252,8 +235,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
 		),
 		definition(
 			"setChatTtsSettings",
-			"Enable or disable ordinary chat speech readout.",
-			vec![("enabled", boolean())],
+			"Patch chat speech readout and queue behavior. Null leaves a field unchanged.",
+            vec![("enabled",nullable(boolean())),("chatAiDictationEnabled",nullable(boolean())),("chatTtsWaitingToneEnabled",nullable(boolean())),("chatTtsSpeakerIntroCooldownSeconds",nullable(json!({"type":"integer","minimum":0,"maximum":600}))),("chatTtsInterruptSilenceMs",nullable(json!({"type":"integer","minimum":0,"maximum":10000}))),("chatTtsQueueExpirationMs",nullable(json!({"type":"integer","minimum":1000,"maximum":600000}))),("chatTtsBlockedWords",nullable(array(string(100),500)))],
 			true,
 			false,
 			false,
@@ -263,17 +246,27 @@ pub fn definitions() -> Vec<ToolDefinition> {
 			"Change the OpenAI model or enable/disable AI. Null leaves a field unchanged. This tool cannot enable platform write grants or change credentials.",
 			vec![
 				("model", nullable(string(200))),
-				("enabled", nullable(boolean())),
+                ("enabled", nullable(boolean())),
+                ("openaiVoiceModel",nullable(string(200))),
+                ("openaiReasoningEffort",nullable(enumeration(&["default","none","minimal","low","medium","high","xhigh"]))),
+                ("openaiVoiceReasoningEffort",nullable(enumeration(&["default","none","minimal","low","medium","high","xhigh"]))),
+                ("imageModel",nullable(string(200))),
+                ("aiWebSearchEnabled",nullable(boolean())),("aiCodeInterpreterEnabled",nullable(boolean())),("aiImageGenerationEnabled",nullable(boolean())),("aiMemoriesEnabled",nullable(boolean())),("aiRemindersEnabled",nullable(boolean())) ,
 			],
 			true,
 			false,
 			false,
 		),
+        definition("setAudioSettings","Patch audio routing and volume. Null leaves a field unchanged. Discord output requires an active voice connection.",vec![("audioOutput",nullable(enumeration(&["overlay","discord"]))),("masterVolume",nullable(number(0.,2.))),("bumblebeeTtsVolume",nullable(number(0.,2.))),("puppetTtsVolume",nullable(number(0.,2.))),("wakeChirpVolume",nullable(number(0.,2.))),("thinkingSoundVolume",nullable(number(0.,2.))),("chatTtsWaitingToneVolume",nullable(number(0.,2.)))],true,false,false),
 		definition(
 			"setVoiceMentionSettings",
 			"Patch Discord listening and replay settings. Permission widening requires explicit approval; a block always overrides an allow entry. Null leaves a field unchanged.",
 			vec![
-				("listenEveryone", nullable(boolean())),
+				("enabled",nullable(boolean())),
+                ("wakeKeywordSensitivity",nullable(enumeration(&["strict","balanced","loose"]))),
+                ("stopKeywordSensitivity",nullable(enumeration(&["strict","balanced","loose"]))),
+                ("cancelKeywordSensitivity",nullable(enumeration(&["strict","balanced","loose"]))),
+                ("listenEveryone", nullable(boolean())),
 				("listenRoleIds", nullable(array(string(20), 200))),
 				("allowedUserIds", nullable(array(string(20), 200))),
 				("blockedUserIds", nullable(array(string(20), 200))),
@@ -427,6 +420,10 @@ pub async fn execute(
 	cancel: CancellationToken,
 ) -> Result<Value> {
 	let owner = super::is_owner(engine, &cp.source).await?;
+	ensure!(
+		crate::settings::tool_enabled(&engine.store.settings()?, &call.name),
+		"This capability is disabled in Settings"
+	);
 	let actor = durable::actor(&cp.source);
 	let text = |key: &str| -> Result<&str> {
 		args[key]
@@ -455,8 +452,10 @@ pub async fn execute(
 			let query = args["query"].as_str().unwrap_or("").to_lowercase();
 			let offset = args["offset"].as_u64().unwrap_or(0) as usize;
 			let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+			let enabled = engine.store.settings()?;
 			let all: Vec<_> = definitions()
 				.into_iter()
+				.filter(|d| crate::settings::tool_enabled(&enabled, &d.name))
 				.filter(|d| {
 					(!d.owner_only || owner)
 						&& format!("{} {}", d.name, d.description)
@@ -471,6 +470,9 @@ pub async fn execute(
 			json!({"status":"saved","memory":engine.store.remember(&actor,text("content")?)?})
 		}
 		"listMemories" => {
+			if owner {
+				cp.owner_context = true;
+			}
 			json!({"status":"observed","memories":engine.store.memories(&actor,owner)?})
 		}
 		"updateMemory" => {
@@ -519,11 +521,13 @@ pub async fn execute(
 			let settings: OverlaySettings = serde_json::from_value(next.clone())?;
 			settings.validate()?;
 			save_setting(engine, "overlay_settings", &before, &next)?;
+			engine.overlay_settings_changed(&settings)?;
 			engine.emit(OverlayEvent::OverlaySettings { settings });
 			json!({"status":"applied","settings":next})
 		}
 		"setBumblebeeVoice"
 		| "setChatTtsSettings"
+		| "setAudioSettings"
 		| "setAiSettings"
 		| "setVoiceMentionSettings"
 		| "setDiscordConnectionSettings" => {
@@ -531,8 +535,40 @@ pub async fn execute(
 			let mut next = before.clone();
 			match call.name.as_str() {
 				"setBumblebeeVoice" => next["bumblebeeVoice"] = args["voiceId"].clone(),
-				"setChatTtsSettings" => next["readChat"] = args["enabled"].clone(),
+				"setAudioSettings" => patch(&mut next, args)?,
+				"setChatTtsSettings" => {
+					if !args["enabled"].is_null() {
+						next["readChat"] = args["enabled"].clone();
+					}
+					for key in [
+						"chatAiDictationEnabled",
+						"chatTtsWaitingToneEnabled",
+						"chatTtsSpeakerIntroCooldownSeconds",
+						"chatTtsInterruptSilenceMs",
+						"chatTtsQueueExpirationMs",
+						"chatTtsBlockedWords",
+					] {
+						if !args[key].is_null() {
+							next[key] = args[key].clone();
+						}
+					}
+				}
 				"setAiSettings" => {
+					for key in [
+						"openaiVoiceModel",
+						"openaiReasoningEffort",
+						"openaiVoiceReasoningEffort",
+						"imageModel",
+						"aiWebSearchEnabled",
+						"aiCodeInterpreterEnabled",
+						"aiImageGenerationEnabled",
+						"aiMemoriesEnabled",
+						"aiRemindersEnabled",
+					] {
+						if !args[key].is_null() {
+							next[key] = args[key].clone();
+						}
+					}
 					if !args["model"].is_null() {
 						next["openaiModel"] = args["model"].clone();
 					}
@@ -542,6 +578,10 @@ pub async fn execute(
 				}
 				"setVoiceMentionSettings" => {
 					for (from, to) in [
+						("enabled", "voiceMentionsEnabled"),
+						("wakeKeywordSensitivity", "wakeKeywordSensitivity"),
+						("stopKeywordSensitivity", "stopKeywordSensitivity"),
+						("cancelKeywordSensitivity", "cancelKeywordSensitivity"),
 						("listenEveryone", "discordListenEveryone"),
 						("listenRoleIds", "discordListenRoleIds"),
 						("allowedUserIds", "discordListenAllowedUserIds"),
@@ -571,14 +611,9 @@ pub async fn execute(
 			let settings: Settings = serde_json::from_value(next.clone())?;
 			settings.validate()?;
 			save_setting(engine, "installation", &before, &next)?;
-			let refresh = if matches!(
-				call.name.as_str(),
-				"setVoiceMentionSettings" | "setDiscordConnectionSettings"
-			) {
-				engine.refresh_voice_settings().await
-			} else {
-				Ok(())
-			};
+			let refresh = engine
+				.settings_changed_from_agent(&serde_json::from_value(before)?)
+				.await;
 			match refresh {
 				Ok(()) => json!({"status":"applied","settings":next}),
 				Err(error) => {
@@ -598,11 +633,14 @@ pub async fn execute(
 			);
 			save_setting(engine, key, &undo["after"], &undo["before"])?;
 			if key == "overlay_settings" {
+				engine.overlay_settings_changed(&serde_json::from_value(undo["before"].clone())?)?;
 				engine.emit(OverlayEvent::OverlaySettings {
 					settings: serde_json::from_value(undo["before"].clone())?,
 				});
 			} else {
-				engine.refresh_voice_settings().await?;
+				engine
+					.settings_changed_from_agent(&serde_json::from_value(undo["after"].clone())?)
+					.await?;
 			}
 			json!({"status":"restored","settings":undo["before"]})
 		}
@@ -661,15 +699,10 @@ pub async fn execute(
 fn overlay(engine: &Engine) -> Result<OverlaySettings> {
 	Ok(engine.store.get("overlay_settings")?.unwrap_or_default())
 }
-fn patch(target: &mut Value, patch: &Value) -> Result<()> {
-	for (key, value) in patch.as_object().context("Patch must be an object")? {
-		if !value.is_null() {
-			ensure!(target.get(key).is_some(), "Unknown setting");
-			target[key] = value.clone();
-		}
-	}
-	Ok(())
+fn patch(target: &mut Value, value: &Value) -> Result<()> {
+	crate::settings::merge_patch(target, value)
 }
+
 fn save_setting(engine: &Engine, key: &str, before: &Value, after: &Value) -> Result<()> {
 	let mut db = engine.store.db()?;
 	let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;

@@ -1,0 +1,105 @@
+{
+  "name": "@hivetech/bumblebee",
+  "version": "0.0.4",
+  "description": "Browser runtime for summoning and driving Bumblebee and chat puppets.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexAllocated/bumblebee-desktop.git",
+    "directory": "packages/bumblebee"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./frame-renderer": {
+      "development": "./src/frameRenderer.ts",
+      "types": "./dist/frameRenderer.d.ts",
+      "import": "./dist/frame-renderer.js"
+    },
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./low-level": {
+      "development": "./src/low-level.ts",
+      "types": "./dist/low-level.d.ts",
+      "import": "./dist/low-level.js"
+    },
+    "./bitcrusher": {
+      "development": "./src/utils/bitcrusher.ts",
+      "types": "./dist/utils/bitcrusher.d.ts",
+      "import": "./dist/bitcrusher.js"
+    },
+    "./dialogue-bleeps": {
+      "development": "./src/overlay/dialogueBleeps.ts",
+      "types": "./dist/overlay/dialogueBleeps.d.ts",
+      "import": "./dist/dialogue-bleeps.js"
+    },
+    "./handle-colors": {
+      "development": "./src/utils/handleColors.ts",
+      "types": "./dist/utils/handleColors.d.ts",
+      "import": "./dist/handle-colors.js"
+    },
+    "./tools": {
+      "development": "./src/tools.ts",
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js"
+    },
+    "./timeline": {
+      "development": "./src/timeline.ts",
+      "types": "./dist/timeline.d.ts",
+      "import": "./dist/timeline.js"
+    },
+    "./screen-to-world": {
+      "development": "./src/utils/screenToWorld.ts",
+      "types": "./dist/utils/screenToWorld.d.ts",
+      "import": "./dist/screen-to-world.js"
+    },
+    "./speech-assets": {
+      "development": "./src/speech-assets.ts",
+      "types": "./dist/speech-assets.d.ts",
+      "import": "./dist/speech-assets.js"
+    },
+    "./style.css": {
+      "development": "./src/style.css",
+      "types": "./dist/style.css.d.ts",
+      "default": "./dist/style.css"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "vite build --config vite.config.ts && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "format": "prettier --ignore-unknown --write .",
+    "format:check": "prettier --ignore-unknown --check .",
+    "prepack": "bun run build",
+    "test": "bun --conditions=development test"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^9.22.0",
+    "@babylonjs/loaders": "^9.22.0",
+    "@hivetech/speech-bubbles": "workspace:*",
+    "immer": "^11.1.18",
+    "marching-squares": "^1.0.0",
+    "uuid": "^14.0.2",
+    "xstate": "^5.32.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "vite": "^7.2.2",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3"
+  },
+  "license": "MIT"
+}

@@ -1,6 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { createStage } from "./renderer/stage";
+  import OverlayEditor from "./OverlayEditor.svelte";
+  import {
+    cloneOverlaySettings,
+    defaultOverlaySettings,
+    applyOverlayPatch,
+    type OverlaySettings,
+    type OverlaySettingsPatch,
+  } from "./lib/overlay";
+  import { defaultDimensions } from "./renderer/overlayLayout";
   import type { OverlayEvent } from "./lib/types";
   let {
     assetBase,
@@ -8,24 +17,90 @@
     subscribe,
     onReady,
     onError,
+    editing = false,
+    settings,
+    onPreview,
+    onCommit,
   }: {
     assetBase: string;
     muted?: boolean;
     subscribe: (callback: (event: OverlayEvent) => void) => () => void;
     onReady?: (verify: () => Promise<void>) => void;
     onError?: (error: unknown) => void;
+    editing?: boolean;
+    settings?: OverlaySettings;
+    onPreview?: (settings: OverlaySettings) => void;
+    onCommit?: (patch: OverlaySettingsPatch) => Promise<OverlaySettings | void>;
   } = $props();
   let element: HTMLDivElement;
   let stage: ReturnType<typeof createStage> | undefined;
+  let draft = $state<OverlaySettings>(
+    cloneOverlaySettings(defaultOverlaySettings),
+  );
+  let canonical = cloneOverlaySettings(defaultOverlaySettings);
+  let previousSettings: OverlaySettings | undefined;
+  let viewport = $state({ width: 0, height: 0 });
+  let dimensions = $state(structuredClone(defaultDimensions));
+  let revision = 0;
+  let previewing = false;
+  function preview(next: OverlaySettings) {
+    revision++;
+    previewing = true;
+    draft = next;
+    stage?.applySettings(next);
+    onPreview?.(next);
+  }
+  async function commit(patch: OverlaySettingsPatch) {
+    const started = revision;
+    try {
+      const saved = await onCommit?.(patch);
+      canonical = cloneOverlaySettings(
+        saved ?? applyOverlayPatch(canonical, patch),
+      );
+      if (started === revision) {
+        previewing = false;
+        draft = canonical;
+        stage?.applySettings(draft);
+      }
+      return canonical;
+    } catch (error) {
+      if (started === revision) {
+        previewing = false;
+        draft = canonical;
+        stage?.applySettings(draft);
+      }
+      throw error;
+    }
+  }
   onMount(() => {
-    stage = createStage(element, assetBase, muted);
+    stage = createStage(element, assetBase, muted, editing);
+    stage.applySettings(draft);
     void stage.ready
-      .then(() => onReady?.(stage!.verifyRenderedFrame))
+      .then(() => {
+        dimensions = stage!.getDimensions();
+        onReady?.(stage!.verifyRenderedFrame);
+      })
       .catch((error) => onError?.(error));
     const unsubscribe = subscribe((event) => {
-      void stage?.consume(event);
+      if (event.type === "overlay_settings") {
+        canonical = cloneOverlaySettings(event.settings);
+        if (previewing) return;
+        draft = canonical;
+      }
+      void stage
+        ?.consume(event)
+        .then(() => {
+          if (stage) dimensions = stage.getDimensions();
+        })
+        .catch((error) => onError?.(error));
     });
+    const resize = new ResizeObserver(() => {
+      viewport = { width: element.clientWidth, height: element.clientHeight };
+      if (stage) dimensions = stage.getDimensions();
+    });
+    resize.observe(element);
     return () => {
+      resize.disconnect();
       unsubscribe();
       stage?.dispose();
     };
@@ -33,9 +108,36 @@
   $effect(() => {
     stage?.setMuted(muted);
   });
+  $effect(() => {
+    stage?.setEditing(editing);
+  });
+  $effect(() => {
+    if (settings && settings !== previousSettings) {
+      previousSettings = settings;
+      if (!previewing) {
+        canonical = cloneOverlaySettings(settings);
+        draft = canonical;
+        stage?.applySettings(draft);
+      }
+    }
+  });
 </script>
 
-<div class="stage" bind:this={element}></div>
+<div class="stage" bind:this={element}>
+  {#if editing && onCommit}<OverlayEditor
+      settings={draft}
+      {viewport}
+      {dimensions}
+      onPreview={preview}
+      onCommit={commit}
+      onCancel={() => {
+        previewing = false;
+        draft = cloneOverlaySettings(canonical);
+        stage?.applySettings(draft);
+        onPreview?.(draft);
+      }}
+    />{/if}
+</div>
 
 <style>
   .stage {
@@ -43,54 +145,6 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
-  }
-  :global(.puppet-label) {
-    position: absolute;
-    z-index: 3;
-    pointer-events: none;
-    transform-origin: center;
-    background: #171e29e8;
-    border: 1px solid #f5df9390;
-    border-radius: 8px;
-    color: #fff4d0;
-    padding: 4px 9px;
-    font: 600 13px system-ui;
-    white-space: nowrap;
-  }
-  :global(.speech-bubble) {
-    position: absolute;
-    bottom: 36%;
-    transform: translateX(-50%);
-    box-sizing: border-box;
-    width: max-content;
-    max-width: calc(100% - 16px);
-    max-height: calc(64% - 8px);
-    overflow-x: hidden;
-    overflow-y: auto;
-    scrollbar-width: none;
-    overflow-wrap: anywhere;
-    white-space: pre-wrap;
-    z-index: 4;
-    color: #202029;
-    background: #fff9e8;
-    border: 3px solid #433d36;
-    border-radius: 25px;
-    padding: 14px 20px;
-    font: 600 clamp(14px, 2vw, 25px)/1.4 system-ui;
-    box-shadow: 0 5px 0 #20202925;
-    text-wrap: balance;
-    text-align: center;
-  }
-  :global(.speech-bubble[hidden]) {
-    display: none;
-  }
-  :global(.speech-bubble::-webkit-scrollbar) {
-    display: none;
-  }
-  :global(.current-word) {
-    color: #9b5304;
-    background: #ffe08a;
-    border-radius: 3px;
   }
   :global(.overlay-presentation) {
     position: absolute;

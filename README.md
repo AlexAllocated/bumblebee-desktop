@@ -34,6 +34,8 @@ A viewer receives a random built-in puppet and voice on first participation. Tha
 | `!voice <name>` | Select a curated preset or an Azure English voice |
 | `!voices <search>` | Find voices; use the returned pagination hint for more |
 
+The dashboard retains the draggable overlay editor and a single dark Settings drawer. Position and resize Bumblebee, chat puppets and the separate streamer caption bubble; the same layout renders in OBS. Discord voice puppets are not included.
+
 Settings contains image approvals and searchable chatter profiles. An approved image is stored locally: changing the original URL cannot replace what the streamer approved. Viewers can be reset or blocked from customization. Bumblebee's own curated voice is configured separately.
 
 ## Local data and permissions
@@ -43,6 +45,8 @@ SQLite stores settings, profiles, memories, reminders, pending questions, and th
 The OBS endpoint listens on loopback, normally port 2899, and uses a persistent, revocable token. It serves rendering content, not application controls or credentials. Treat its URL as private. The agent's platform-management abilities are opt-in and require current provider permissions; consequential actions require confirmation. An interrupted action with an unknown result is not automatically repeated.
 
 ## Development and contribution
+
+The reusable `@hivetech/bumblebee` and `@hivetech/speech-bubbles` packages live under `packages/`; the desktop consumes their APIs directly.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md), and [packaging](docs/packaging.md). Installer workflows replace the old cloud deployment system. The repository is self-contained and does not require access to the old private project or Linear.
 

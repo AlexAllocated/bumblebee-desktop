@@ -1,10 +1,35 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke, isTauri } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
-  import { openUrl } from "@tauri-apps/plugin-opener";
-  import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+  import { isTauri } from "@tauri-apps/api/core";
   import Stage from "./Stage.svelte";
+  import SettingsDrawer from "./SettingsDrawer.svelte";
+  import OverlayControls from "./OverlayControls.svelte";
+  import PlatformSettings from "./settings/PlatformSettings.svelte";
+  import ChatterOverrides from "./settings/ChatterOverrides.svelte";
+  import ResetPreferences, {
+    type ResetScope,
+  } from "./settings/ResetPreferences.svelte";
+  import AudioSettings from "./settings/AudioSettings.svelte";
+  import AiSettings from "./settings/AiSettings.svelte";
+  import LibrarySettings from "./settings/LibrarySettings.svelte";
+  import { desktopBackend, type DesktopBackend } from "./lib/desktop";
+  import { createSettingsWriter } from "./lib/settingsWriter";
+  import {
+    subjectLabels,
+    type OverlaySubject,
+    type OverlaySettingsPatch,
+    type OverlaySettings,
+  } from "./lib/overlay";
+  import type { Settings, Library } from "./lib/types";
+  let { backend = desktopBackend }: { backend?: DesktopBackend } = $props();
+  const invoke = <T,>(command: string, args?: Record<string, unknown>) =>
+    backend.invoke<T>(command, args);
+  const listen: DesktopBackend["listen"] = (...args) => backend.listen(...args);
+  const openUrl: DesktopBackend["openUrl"] = (...args) =>
+    backend.openUrl(...args);
+  const enable = () => backend.autostart.enable();
+  const disable = () => backend.autostart.disable();
+  const isEnabled = () => backend.autostart.isEnabled();
   import PendingImage from "./PendingImage.svelte";
   import type {
     Chatter,
@@ -14,7 +39,7 @@
   } from "./lib/types";
   let snapshot: Snapshot | null = $state(null);
   let drawer = $state(false);
-  let section = $state("connections");
+  let section = $state("home");
   let busy = $state("");
   let error = $state("");
   let notice = $state("");
@@ -68,13 +93,202 @@
             .includes(voiceSearch.toLowerCase()),
       ) ?? [],
   );
+  let saveStatus = $state<"idle" | "saving" | "saved" | "error">("idle");
+  let saveError = $state("");
+  let library = $state<Library | null>(null);
+  let models = $state<string[]>([]);
+  let overlaySubject = $state<OverlaySubject>("bumblebee");
+  let rotationPending = $state(false);
+  let showSpeechPreview = $state(false);
+
+  const sections = [
+    {
+      id: "discord",
+      label: "Discord",
+      description: "Server, channels, chat permissions and voice listening.",
+      icon: "◖",
+    },
+    {
+      id: "twitch",
+      label: "Twitch",
+      description: "Your channel, chat permissions and relay.",
+      icon: "◩",
+    },
+    {
+      id: "youtube",
+      label: "YouTube",
+      description: "Your broadcast, chat permissions and relay.",
+      icon: "▶",
+    },
+    {
+      id: "audio",
+      label: "Chat and audio",
+      description: "Voices, output, volume, queue and interruption.",
+      icon: "♫",
+    },
+    {
+      id: "overlay",
+      label: "Overlay",
+      description: "Puppets, speech bubbles, anchors and visibility.",
+      icon: "▣",
+    },
+    {
+      id: "ai",
+      label: "AI",
+      description: "Models, reasoning and Bumblebee’s tool permissions.",
+      icon: "✦",
+    },
+    {
+      id: "library",
+      label: "Memories and reminders",
+      description: "Review what Bumblebee remembers and schedules.",
+      icon: "◷",
+    },
+    {
+      id: "puppets",
+      label: "Overrides and chatters",
+      description: "Per-viewer permissions, puppets and image approval.",
+      icon: "♙",
+    },
+    {
+      id: "voices",
+      label: "Voice catalog",
+      description: "Curated personalities and regional English voices.",
+      icon: "≋",
+    },
+    {
+      id: "application",
+      label: "Application",
+      description: "OBS connection, saved credentials and startup.",
+      icon: "⚙",
+    },
+  ];
+  const settingsWriter = createSettingsWriter<Settings>({
+    read: () => snapshot!.settings,
+    apply: (settings) => {
+      if (snapshot) snapshot.settings = settings;
+    },
+    persist: (patch) => invoke<Settings>("patch_settings", { patch }),
+    status: (state, message) => {
+      saveStatus = state;
+      saveError = message ?? "";
+    },
+  });
   async function refresh() {
     const next = await invoke<Snapshot>("get_snapshot");
-    if (drawer && snapshot) next.settings = snapshot.settings;
+    if (snapshot) {
+      settingsWriter.accept(next.settings);
+      next.settings = snapshot.settings;
+    } else {
+      snapshot = next;
+      settingsWriter.accept(next.settings);
+    }
+    if (profileSearch.trim())
+      next.chatters = await invoke<Chatter[]>("search_chatters", {
+        search: profileSearch,
+      });
     snapshot = next;
-    statuses = snapshot.statuses;
-    if (snapshot.credentialStoreError || snapshot.overlayError)
-      error = snapshot.credentialStoreError ?? snapshot.overlayError ?? "";
+    statuses = next.statuses;
+    if (next.credentialStoreError || next.overlayError)
+      error = next.credentialStoreError ?? next.overlayError ?? "";
+  }
+  function settingsChanged() {
+    settingsWriter.schedule();
+  }
+  async function closeSettings() {
+    try {
+      await settingsWriter.flush();
+      drawer = false;
+    } catch {}
+  }
+  function openSection(id: string) {
+    section = id;
+    drawer = true;
+    if (id === "library") void run("Loading memories", loadLibrary);
+  }
+  async function loadLibrary() {
+    library = await invoke<Library>("get_library");
+  }
+  async function loadModels() {
+    models = await invoke<string[]>("openai_models");
+  }
+  let overlaySave: Promise<unknown> = Promise.resolve();
+  function commitOverlay(
+    patch: OverlaySettingsPatch,
+  ): Promise<OverlaySettings> {
+    saveStatus = "saving";
+    saveError = "";
+    const operation = overlaySave
+      .catch(() => {})
+      .then(async () => {
+        const settings = await invoke<OverlaySettings>(
+          "patch_overlay_settings",
+          { patch },
+        );
+        if (snapshot) snapshot.overlaySettings = settings;
+        saveStatus = "saved";
+        return settings;
+      })
+      .catch((e) => {
+        saveStatus = "error";
+        saveError = String(e);
+        throw e;
+      });
+    overlaySave = operation;
+    return operation;
+  }
+  async function resetPreferences(scope: ResetScope) {
+    if (busy) throw new Error("Wait for the current operation to finish.");
+    busy = "Resetting preferences";
+    try {
+      await settingsWriter.flush();
+      await overlaySave.catch(() => {});
+      const result = await invoke<{
+        settings: Settings;
+        overlaySettings: OverlaySettings | null;
+      }>("reset_preferences", { scope });
+      settingsWriter.accept(result.settings);
+      if (snapshot && result.overlaySettings)
+        snapshot.overlaySettings = result.overlaySettings;
+    } finally {
+      busy = "";
+    }
+  }
+  async function storeSecret(name: string, value: string) {
+    secretInputs[name] = value;
+    await saveSecret(name);
+  }
+  function providerLabel(id: string) {
+    return (
+      (
+        {
+          azure_speech: "Speech",
+          openai: "OpenAI",
+          twitch: "Twitch",
+          youtube: "YouTube",
+          discord: "Discord",
+        } as Record<string, string>
+      )[id] ?? id
+    );
+  }
+  function providerState(id: string) {
+    const status = statuses.find((s) => s.provider === id);
+    if (status) return status.state;
+    const secret =
+      (
+        {
+          twitch: "twitch_tokens",
+          youtube: "google_tokens",
+          discord: "discord_bot",
+        } as Record<string, string>
+      )[id] ?? id;
+    return snapshot?.secrets[secret] ? "Configured" : "Not configured";
+  }
+  async function copyOverlay() {
+    if (snapshot) {
+      await navigator.clipboard.writeText(snapshot.overlayUrl);
+      notice = "Overlay URL copied. Paste it into your OBS Browser Source.";
+    }
   }
   async function activity() {
     if (!snapshot) return;
@@ -105,18 +319,7 @@
     }
   }
   async function save() {
-    if (snapshot) {
-      snapshot.settings = await invoke("save_settings", {
-        settings: snapshot.settings,
-      });
-      snapshot.overlaySettings = await invoke("save_overlay_settings", {
-        settings: snapshot.overlaySettings,
-      });
-      notice = snapshot.active
-        ? "Settings saved. Active integrations are reconnecting with the new configuration."
-        : "Settings saved.";
-      await activity();
-    }
+    await settingsWriter.flush();
   }
   async function saveSecret(name: string) {
     const value = secretInputs[name]?.trim();
@@ -165,7 +368,7 @@
     );
   }
   onMount(() => {
-    if (!isTauri()) return;
+    if (!backend.available) return;
     let disposed = false;
     const unlisten: (() => void)[] = [];
     const activityTimer = setInterval(() => {
@@ -219,60 +422,46 @@
     });
     return () => {
       disposed = true;
+      settingsWriter.dispose();
       clearInterval(activityTimer);
       unlisten.forEach((fn) => fn());
     };
   });
 </script>
 
-<div class="app-shell">
-  <header>
+<div class="app-shell dashboard-workspace">
+  <header class="desktop-header">
     <div class="brand">
       <img src="./bumblebee.png" alt="" />
-      <div>
-        <strong>Bumblebee</strong><span
-          >YOUR STREAM, WITH A LITTLE MORE BUZZ.</span
-        >
-      </div>
+      <div><strong>Bumblebee</strong><span>STREAMER DASHBOARD</span></div>
     </div>
     <div class="header-actions">
       <span class:live={snapshot?.active} class="session-indicator"
         ><i></i>{snapshot?.active
           ? "Session running"
           : "Ready when you are"}</span
-      ><button class="quiet" onclick={() => (drawer = true)}
-        >⚙ <span>Settings</span></button
       >
-    </div>
-  </header>
-
-  <main>
-    <div class="welcome">
-      <div>
-        <p class="eyebrow">AT HOME ON YOUR DESKTOP</p>
-        <h1>Make yourself at home.</h1>
-        <p>Your companion, your voices, your little corner of the internet.</p>
-      </div>
       <button
-        class="primary"
+        class="primary compact"
         disabled={!snapshot || !!busy}
         onclick={() =>
           run("Session", async () => {
+            await save();
             await invoke(snapshot?.active ? "stop_session" : "start_session");
             await refresh();
-          })}
-        >{snapshot?.active ? "End session" : "Start session"}<span>↗</span
-        ></button
+          })}>{snapshot?.active ? "End session" : "Start session"}</button
       >
     </div>
+  </header>
+  <main class="workspace-main">
     {#if error}<div role="alert" class="banner error">
-        <strong>Something needs attention</strong><span>{error}</span><button
+        <span>{error}</span><button
           onclick={() => (error = "")}
           aria-label="Dismiss error">×</button
         >
       </div>{/if}
     {#if notice}<div role="status" class="banner notice">
-        {notice}<button
+        <span>{notice}</span><button
           onclick={() => (notice = "")}
           aria-label="Dismiss notice">×</button
         >
@@ -343,135 +532,136 @@
             })}>Acknowledge</button
         >
       </section>{/each}
-    <div class="dashboard-grid">
-      <section class="preview panel">
-        <div class="panel-heading">
-          <div>
-            <span class="status-dot"></span><strong>Backstage</strong><small
-              >Desktop preview</small
-            >
-          </div>
+
+    <section class="overlay-workspace panel" aria-label="Overlay editor">
+      <div class="overlay-toolbar">
+        <div class="overlay-address">
+          <span aria-hidden="true">↗</span><input
+            aria-label="OBS overlay URL"
+            value={snapshot?.overlayUrl ?? ""}
+            readonly
+            placeholder="Local overlay URL"
+            onclick={(e) => e.currentTarget.select()}
+          /><button
+            class="compact"
+            disabled={!snapshot || !!snapshot.overlayError}
+            onclick={() => run("Copying overlay URL", copyOverlay)}>Copy</button
+          ><button
+            class="quiet compact"
+            title="Regenerate overlay URL"
+            aria-label="Regenerate overlay URL"
+            disabled={!snapshot}
+            onclick={() => (rotationPending = !rotationPending)}>↻</button
+          >
+        </div>
+        <button
+          class="settings-button"
+          onclick={() => openSection("home")}
+          aria-label="Open settings">⚙ Settings</button
+        >
+      </div>
+      {#if rotationPending}<div class="rotation-confirm" role="alert">
+          <span
+            >Replace the overlay URL? Existing OBS sources will need the new
+            URL.</span
+          ><button
+            onclick={() =>
+              run("Replacing overlay URL", async () => {
+                snapshot!.overlayUrl = await invoke("rotate_overlay_token");
+                rotationPending = false;
+                notice = "Overlay URL replaced. Copy it into OBS.";
+              })}>Replace URL</button
+          ><button class="quiet" onclick={() => (rotationPending = false)}
+            >Cancel</button
+          >
+        </div>{/if}
+      <div class="editor-canvas">
+        {#if snapshot}{#key assetBase}<Stage
+              {assetBase}
+              {subscribe}
+              muted={previewMuted}
+              editing={true}
+              settings={snapshot.overlaySettings}
+              onCommit={commitOverlay}
+              onReady={rendererReady}
+              onError={rendererResult}
+            />{/key}{:else}<div class="unavailable">
+            <img src="./bumblebee.png" alt="Bumblebee" />
+            <p>Loading your workspace…</p>
+          </div>{/if}
+      </div>
+      <div class="editor-footer">
+        <span
+          >Drag to position · resize with handles · changes save automatically</span
+        >
+        <div>
           <button class="subtle" onclick={() => (previewMuted = !previewMuted)}
             >{previewMuted ? "Unmute preview" : "Mute preview"}</button
+          ><button
+            class="subtle"
+            onclick={() => (showSpeechPreview = !showSpeechPreview)}
+            >Test speech</button
+          ><button
+            class="quiet compact"
+            disabled={!snapshot}
+            onclick={() =>
+              run("Stopping speech", () => invoke("cancel_speech"))}
+            >■ Stop speech</button
           >
         </div>
-        <div class="preview-stage">
-          {#if snapshot}{#key assetBase}<Stage
-                {assetBase}
-                {subscribe}
-                muted={previewMuted}
-                onReady={rendererReady}
-                onError={rendererResult}
-              />{/key}{:else}<div class="unavailable">
-              <img src="./bumblebee.png" alt="Bumblebee" />
-              <p>Open Bumblebee as a desktop app to connect your stream.</p>
-            </div>{/if}<span class="preview-label"
-            >1920 × 1080 · transparent in OBS</span
-          >
-        </div>
-        <form
+      </div>
+      {#if showSpeechPreview}<form
           class="preview-input"
           onsubmit={(e) => {
             e.preventDefault();
-            void run("Speech", () =>
-              invoke("preview_speech", { text: previewText }),
-            );
+            void run("Previewing speech", async () => {
+              await save();
+              await invoke("preview_speech", { text: previewText });
+            });
           }}
         >
           <input
             aria-label="Speech preview text"
             bind:value={previewText}
             maxlength={500}
-            placeholder="Give Bumblebee something to say…"
-          /><button
-            disabled={!snapshot || !!busy}
-            class="primary compact"
-            type="submit">Say it</button
-          ><button
-            disabled={!snapshot}
-            type="button"
-            class="quiet compact"
-            onclick={() => run("Cancel", () => invoke("cancel_speech"))}
-            aria-label="Stop speech">■</button
+          /><button class="primary compact" disabled={!snapshot || !!busy}
+            >Say it</button
           >
-        </form>
-      </section>
-      <aside class="right-column">
-        <section class="panel obs">
-          <div class="eyebrow">BRING BUMBLEBEE ON STREAM</div>
-          <h2>A window into your world.</h2>
-          <p>
-            Add a Browser Source in OBS, paste your overlay URL, and set its
-            size to 1920 × 1080.
-          </p>
-          <button
-            class="secondary"
-            disabled={!snapshot || !!snapshot.overlayError}
-            onclick={() =>
-              run("Copying", async () => {
-                await navigator.clipboard.writeText(snapshot!.overlayUrl);
-                notice =
-                  "Overlay URL copied. Paste it into an OBS Browser Source.";
-              })}>Copy OBS overlay URL <span>↗</span></button
-          ><small
-            >The overlay stays on this computer. Keep Bumblebee running while
-            you stream.</small
-          >
-        </section>
-        <section class="panel connections">
-          <div class="panel-heading">
-            <strong>Connections</strong><button
-              class="subtle"
-              onclick={() => {
-                section = "connections";
-                drawer = true;
-              }}>Manage</button
-            >
-          </div>
-          {#each ["twitch", "youtube", "discord", "azure_speech", "openai"] as provider}{@const status =
-              statuses.find((s) => s.provider === provider)}
-            <div class="connection-row">
-              <span
-                class="provider-icon"
-                class:connected={status?.state === "connected"}
-                >{provider === "azure_speech"
-                  ? "S"
-                  : provider.slice(0, 1).toUpperCase()}</span
-              ><span
-                >{provider === "azure_speech"
-                  ? "Azure Speech"
-                  : provider === "openai"
-                    ? "OpenAI"
-                    : provider.slice(0, 1).toUpperCase() +
-                      provider.slice(1)}</span
-              ><small title={status?.message}
-                >{status?.state ?? "Not configured"}</small
-              >
-            </div>{/each}
-        </section>
-      </aside>
-      <section class="panel activity">
-        <div class="panel-heading">
-          <strong>Conversation</strong><small
-            >{log.length ? "This session" : "The stage is yours"}</small
-          >
-        </div>
-        <div class="activity-log" aria-live="polite">
-          {#each log as line}<div class="log-line">
-              <time>{line.time}</time><strong>{line.sender}</strong><span
-                >{line.text}</span
-              >
-            </div>{:else}<div class="empty">
-              <span>✦</span>
-              <p>Every chatter has a voice.</p>
-              <small
-                >Connect a platform and start a session. Your conversation will
-                appear here.</small
-              >
-            </div>{/each}
-        </div>
-      </section>
+        </form>{/if}
+    </section>
+    <div class="connection-strip" aria-label="Connections">
+      {#each ["twitch", "youtube", "discord", "azure_speech", "openai"] as provider}<button
+          title={statuses.find((s) => s.provider === provider)?.message}
+          onclick={() =>
+            openSection(
+              provider === "azure_speech"
+                ? "audio"
+                : provider === "openai"
+                  ? "ai"
+                  : provider,
+            )}
+          ><i class:connected={providerState(provider) === "connected"}
+          ></i><strong>{providerLabel(provider)}</strong><span
+            >{providerState(provider).replaceAll("_", " ")}</span
+          ></button
+        >{/each}
     </div>
+    <details class="panel conversation-panel">
+      <summary
+        >Conversation <span
+          >{log.length ? `${log.length} events` : "This session"}</span
+        ></summary
+      >
+      <div class="activity-log" aria-live="polite">
+        {#each log as line}<div class="log-line">
+            <time>{line.time}</time><strong>{line.sender}</strong><span
+              >{line.text}</span
+            >
+          </div>{:else}<p class="empty-note">
+            Conversation appears here when a session is running.
+          </p>{/each}
+      </div>
+    </details>
     {#if snapshot?.artifacts.length}<section class="panel generated-files">
         <div class="panel-heading">
           <strong>Made with Bumblebee</strong><button
@@ -518,14 +708,8 @@
             </div>
           </div>{/each}
       </section>{/if}
-    <footer>
-      <span>Bumblebee Desktop <small>PREVIEW</small></span><span
-        >Made for the joy of streaming.</span
-      >
-    </footer>
   </main>
 </div>
-
 {#if artifactPreview}<div class="artifact-preview" role="presentation">
     <div>
       <button
@@ -539,292 +723,47 @@
     </div>
   </div>{/if}
 
-{#if drawer}
-  <div
-    class="drawer-backdrop"
-    role="presentation"
-    onclick={(e) => {
-      if (e.target === e.currentTarget) drawer = false;
-    }}
-  ></div>
-  <aside class="settings-drawer" aria-label="Settings">
-    <div class="drawer-title">
-      <div>
-        <p class="eyebrow">MAKE IT YOURS</p>
-        <h2>Settings</h2>
-      </div>
-      <button
-        class="quiet"
-        aria-label="Close settings"
-        onclick={() => (drawer = false)}>×</button
-      >
-    </div>
-    <nav aria-label="Settings sections">
-      {#each [["connections", "Connections"], ["puppets", "Chat puppets"], ["voices", "Voices"], ["overlay", "Overlay"], ["application", "Application"]] as [id, label]}<button
-          class:chosen={section === id}
-          onclick={() => (section = id)}>{label}</button
-        >{/each}
-    </nav>
-    <div class="settings-content">
-      {#if !snapshot}<p>
-          Open this interface in the installed desktop app to configure
-          Bumblebee.
-        </p>{:else if section === "connections"}
-        <p class="section-intro">
-          Bring your own provider accounts. Each connection is optional. Keys
-          and authorization tokens stay in your operating-system keyring.
-        </p>
-        <button
-          class="subtle"
-          onclick={() =>
-            openUrl(
-              "https://github.com/AlexAllocated/bumblebee-desktop/blob/main/docs/provider-setup.md",
-            )}>Step-by-step setup guide ↗</button
+<SettingsDrawer
+  open={drawer}
+  {section}
+  {sections}
+  onSectionChange={openSection}
+  onClose={() => void closeSettings()}
+  {saveStatus}
+  saveMessage={saveError}
+  width={560}
+>
+  <fieldset
+    class="settings-body settings-fields"
+    disabled={!!busy}
+    onchange={settingsChanged}
+    aria-label="Settings controls"
+  >
+    {#if error}<div class="banner error" role="alert">
+        {error}<button aria-label="Dismiss error" onclick={() => (error = "")}
+          >×</button
         >
-        <section class="settings-card">
-          <h3>Azure Speech</h3>
-          <p>Natural voices for Bumblebee and your chatters.</p>
-          <label
-            >Resource region<input
-              bind:value={snapshot.settings.azureRegion}
-              placeholder="eastus"
-            /></label
-          ><label
-            >Speech key<input
-              type="password"
-              autocomplete="off"
-              bind:value={secretInputs.azure_speech}
-              placeholder={snapshot.secrets.azure_speech
-                ? "Saved in keyring • enter a replacement"
-                : "Paste your Speech resource key"}
-            /></label
-          >
-          <div class="button-row">
-            <button
-              disabled={!!busy || !secretInputs.azure_speech}
-              onclick={() =>
-                run("Saving key", () => saveSecret("azure_speech"))}
-              >Save key</button
-            ><button
-              disabled={!!busy}
-              onclick={() =>
-                run("Validating Speech", () => validate("azure_speech"))}
-              >Validate & refresh voices</button
-            ><button
-              class="subtle"
-              onclick={() =>
-                openUrl(
-                  "https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices",
-                )}>Create Speech resource ↗</button
-            >
-          </div>
-        </section>
-        <section class="settings-card">
-          <h3>OpenAI</h3>
-          <p>Bumblebee’s thoughts, tools, and memories.</p>
-          <label
-            >API key<input
-              type="password"
-              autocomplete="off"
-              bind:value={secretInputs.openai}
-              placeholder={snapshot.secrets.openai
-                ? "Saved in keyring • enter a replacement"
-                : "Paste your API key"}
-            /></label
-          ><label
-            >Model<input
-              bind:value={snapshot.settings.openaiModel}
-              placeholder="A Responses API model available to your account"
-            /></label
-          ><label class="check"
-            ><input
-              type="checkbox"
-              bind:checked={snapshot.settings.aiEnabled}
-            />Enable Bumblebee’s agent</label
-          >
-          <div class="button-row">
-            <button
-              disabled={!!busy || !secretInputs.openai}
-              onclick={() => run("Saving key", () => saveSecret("openai"))}
-              >Save key</button
-            ><button
-              disabled={!!busy}
-              onclick={() => run("Validating OpenAI", () => validate("openai"))}
-              >Validate</button
-            >
-          </div>
-          <h3>Agent permissions</h3>
-          <p>
-            Allow the tool groups Bumblebee may use on your behalf. Sensitive
-            actions still require confirmation. After changing Twitch
-            permissions, authorize Twitch again to grant the additional scopes.
-          </p>
-          {#each [["discord_resources", "Discord channels and messages"], ["discord_moderation", "Discord moderation, roles and voice"], ["twitch_broadcast", "Twitch stream controls, raids, ads and clips"], ["twitch_moderation", "Twitch moderation, chat modes and shoutouts"], ["twitch_polls", "Twitch polls"], ["youtube_moderation", "YouTube moderation"], ["youtube_polls", "YouTube polls"]] as [group, label]}<label
-              class="check"
-              ><input
-                type="checkbox"
-                value={group}
-                bind:group={snapshot.settings.enabledToolGroups}
-              />{label}</label
-            >{/each}
-        </section>
-        <section class="settings-card">
-          <h3>Twitch</h3>
-          <p>
-            Register a <b>public</b> Twitch application, then authorize in your browser.
-            Messages are posted as the account you authorize.
-          </p>
-          <label
-            >Client ID<input
-              bind:value={snapshot.settings.twitchClientId}
-            /></label
-          ><label
-            >Channel login<input
-              bind:value={snapshot.settings.twitchChannel}
-              placeholder="your_channel"
-            /></label
-          >
-          <div class="button-row">
-            <button
-              disabled={!!busy}
-              onclick={() =>
-                run("Authorizing Twitch", () => authorize("twitch"))}
-              >Authorize Twitch</button
-            ><button
-              class="subtle"
-              onclick={() => openUrl("https://dev.twitch.tv/console/apps")}
-              >Developer console ↗</button
-            >
-          </div>
-        </section>
-        <section class="settings-card">
-          <h3>YouTube</h3>
-          <p>
-            Create a Google OAuth client with the <b>Desktop app</b> type and enable
-            YouTube Data API v3. Authorization returns directly to this computer.
-          </p>
-          <label
-            >Desktop client ID<input
-              bind:value={snapshot.settings.googleClientId}
-            /></label
-          ><label
-            >Desktop client secret<input
-              type="password"
-              autocomplete="off"
-              bind:value={secretInputs.google_client_secret}
-              placeholder={snapshot.secrets.google_client_secret
-                ? "Saved in keyring"
-                : "From your desktop client configuration"}
-            /></label
-          ><label
-            >Live chat ID<input
-              bind:value={snapshot.settings.youtubeLiveChatId}
-              placeholder="Optional • discover your single active broadcast"
-            /></label
-          >
-          <div class="button-row">
-            <button
-              disabled={!!busy || !secretInputs.google_client_secret}
-              onclick={() =>
-                run("Saving client", () => saveSecret("google_client_secret"))}
-              >Save client secret</button
-            ><button
-              disabled={!!busy}
-              onclick={() =>
-                run("Authorizing YouTube", () => authorize("youtube"))}
-              >Authorize YouTube</button
-            ><button
-              class="subtle"
-              onclick={() =>
-                openUrl("https://console.cloud.google.com/apis/credentials")}
-              >Google Cloud console ↗</button
-            >
-          </div>
-        </section>
-        <section class="settings-card">
-          <h3>Discord</h3>
-          <p>
-            Discord requires your own bot application. Create one, enable <b
-              >Message Content</b
-            >
-            and <b>Server Members</b> intents, then invite it with View Channels,
-            Send Messages, Read Message History, Connect, and Speak permissions.
-          </p>
-          <label
-            >Bot token<input
-              type="password"
-              autocomplete="off"
-              bind:value={secretInputs.discord_bot}
-              placeholder={snapshot.secrets.discord_bot
-                ? "Saved in keyring"
-                : "Paste the token from your app’s Bot page"}
-            /></label
-          >
-          <div class="field-grid">
-            <label
-              >Server ID<input
-                bind:value={snapshot.settings.discordGuildId}
-              /></label
-            ><label
-              >Your Discord user ID<input
-                bind:value={snapshot.settings.ownerDiscordId}
-              /></label
-            ><label
-              >Text channel ID<input
-                bind:value={snapshot.settings.discordTextChannelId}
-              /></label
-            ><label
-              >Voice channel ID<input
-                bind:value={snapshot.settings.discordVoiceChannelId}
-              /></label
-            >
-          </div>
-          <small
-            >Enable Developer Mode in Discord, then right-click a server,
-            channel, or user to copy its ID.</small
-          >
-          <div class="button-row">
-            <button
-              disabled={!!busy || !secretInputs.discord_bot}
-              onclick={() =>
-                run("Saving token", () => saveSecret("discord_bot"))}
-              >Save bot token</button
-            ><button
-              disabled={!!busy}
-              onclick={() =>
-                run("Validating Discord", () => validate("discord"))}
-              >Validate</button
-            ><button
-              class="subtle"
-              onclick={() =>
-                openUrl("https://discord.com/developers/applications")}
-              >Developer portal ↗</button
-            >
-          </div>
-        </section>
-        <section class="settings-card">
-          <h3>Saved credentials</h3>
-          <p>
-            Remove a saved key or authorization to disconnect it. This stops the
-            active session.
-          </p>
-          {#each [["azure_speech", "Azure Speech key"], ["openai", "OpenAI key"], ["discord_bot", "Discord bot token"], ["google_client_secret", "Google client secret"], ["twitch_tokens", "Twitch authorization"], ["google_tokens", "YouTube authorization"]] as [name, label]}
-            {#if snapshot.secrets[name]}
-              <div class="credential-row">
-                <span>{label}</span><button
-                  class="compact"
-                  disabled={!!busy}
-                  onclick={() =>
-                    run("Removing credential", async () => {
-                      await invoke("delete_secret", { name });
-                      await refresh();
-                      notice = `${label} removed from this computer.`;
-                    })}>Remove</button
-                >
-              </div>
-            {/if}
-          {/each}
-        </section>
+      </div>{/if}
+    {#if notice}<div class="banner notice" role="status">
+        {notice}<button
+          aria-label="Dismiss notice"
+          onclick={() => (notice = "")}>×</button
+        >
+      </div>{/if}
+    {#if !snapshot}<p>Loading settings…</p>
+    {:else if section === "discord" || section === "twitch" || section === "youtube"}
+      {#key section}<PlatformSettings
+          platform={section}
+          settings={snapshot.settings}
+          saved={snapshot.secrets}
+          busy={!!busy}
+          {invoke}
+          {run}
+          onSaveSecret={storeSecret}
+          onAuthorize={authorize}
+          onValidate={validate}
+        />{/key}
+      {#if section === "discord"}
         <section class="settings-card">
           <h3>Discord voice privacy</h3>
           <p>
@@ -861,328 +800,376 @@
                   e.currentTarget.value.split(/[,\s]+/).filter(Boolean);
               }}
             /></label
-          ><label
-            >Wake phrase<select bind:value={snapshot.settings.wakeWord}
-              ><option value="hey_bumblebee">Hey Bumblebee</option><option
-                value="bumblebee">Bumblebee</option
-              ></select
-            ></label
-          ><label class="check"
-            ><input
-              type="checkbox"
-              bind:checked={snapshot.settings.replayEnabled}
-            />Allow a short in-memory voice replay buffer</label
-          >{#if snapshot.settings.replayEnabled}<label
-              >Replay duration (seconds, maximum 120)<input
-                type="number"
-                min="5"
-                max="120"
-                bind:value={snapshot.settings.replaySeconds}
-              /></label
-            >{/if}<small
-            >Voice permission changes are checked before a turn resumes. Saving
-            applies permissions immediately and reconnects an active session.</small
-          >
-        </section>
-      {:else if section === "puppets"}
-        <label class="check"
-          ><input
-            type="checkbox"
-            bind:checked={snapshot.settings.customImagesEnabled}
-          />Allow viewers to submit custom puppet images for approval</label
-        >
-        <p class="section-intro">
-          Viewers use <code>!puppet</code> and <code>!voice</code> in chat. Images
-          remain on their current puppet until you approve the exact downloaded image
-          below.
-        </p>
-        <h3>
-          Awaiting your approval <span class="count"
-            >{snapshot.pendingImages.length}</span
-          >
-        </h3>
-        {#if snapshot.pendingImages.length > 30}<p class="empty-note">
-            Showing the first 30 submissions. Reviewing these reveals the next
-            submissions.
-          </p>{/if}
-        {#each snapshot.pendingImages.slice(0, 30) as submission (submission.id)}<div
-            class="submission"
-          >
-            <PendingImage id={submission.id} name={submission.displayName} />
-            <div>
-              <strong>{submission.displayName}</strong><small
-                >{submission.platform} · {new Date(
-                  submission.submittedAt,
-                ).toLocaleString()}</small
-              >
-              <div class="button-row">
-                <button
-                  class="primary compact"
-                  disabled={!!busy}
-                  onclick={() =>
-                    run("Approving image", async () => {
-                      await invoke("review_image", {
-                        id: submission.id,
-                        approve: true,
-                      });
-                      await refresh();
-                    })}>Approve</button
-                ><button
-                  disabled={!!busy}
-                  onclick={() =>
-                    run("Rejecting image", async () => {
-                      await invoke("review_image", {
-                        id: submission.id,
-                        approve: false,
-                      });
-                      await refresh();
-                    })}>Reject</button
-                >
-              </div>
-            </div>
-          </div>{:else}<p class="empty-note">
-            No images waiting for approval.
-          </p>{/each}
-        <h3>Chatter profiles</h3>
-        <form
-          class="search-row"
-          onsubmit={(e) => {
-            e.preventDefault();
-            void run("Searching", async () => {
-              snapshot!.chatters = await invoke("search_chatters", {
-                search: profileSearch,
-              });
-            });
-          }}
-        >
-          <input
-            bind:value={profileSearch}
-            placeholder="Search by display name"
-            aria-label="Search chatter profiles"
-          /><button disabled={!!busy}>Search</button>
-        </form>
-        {#each snapshot.chatters as chatter}<div class="profile">
-            <img src={picture(chatter)} alt="" />
-            <div class="profile-details">
-              <strong>{chatter.displayName}</strong><small
-                >{chatter.platform} · {chatter.voiceId}</small
-              >
-              <div class="button-row">
-                <select
-                  aria-label={`Puppet for ${chatter.displayName}`}
-                  value={chatter.puppetId}
-                  onchange={(e) =>
-                    run("Updating puppet", () =>
-                      updateChatter(chatter, {
-                        puppetId: e.currentTarget.value,
-                      }),
-                    )}
-                  >{#each snapshot.puppets as puppet}<option value={puppet.id}
-                      >{puppet.name}</option
-                    >{/each}</select
-                ><button
-                  disabled={!!busy}
-                  onclick={() =>
-                    run("Resetting puppet", () =>
-                      updateChatter(chatter, { puppetId: chatter.puppetId }),
-                    )}>Reset image</button
-                ><button
-                  disabled={!!busy}
-                  onclick={() =>
-                    run("Changing permissions", () =>
-                      updateChatter(chatter, {
-                        blocked: !chatter.customizationBlocked,
-                      }),
-                    )}
-                  >{chatter.customizationBlocked
-                    ? "Unblock changes"
-                    : "Block changes"}</button
-                >
-              </div>
-            </div>
-          </div>{:else}<p class="empty-note">
-            Profiles appear when viewers first participate.
-          </p>{/each}
-      {:else if section === "voices"}
-        <h3>Bumblebee’s voice</h3>
-        <p class="section-intro">
-          Bumblebee keeps her own voice. Viewer randomization draws from the
-          puppet presets and the regional English catalog.
-        </p>
-        <label
-          >Companion voice<select bind:value={snapshot.settings.bumblebeeVoice}
-            >{#each snapshot.voices.filter((v) => v.role === "bumblebee") as voice}<option
-                value={voice.id}
-                >{voice.name ?? voice.id} · {voice.voiceName}</option
-              >{/each}</select
-          ></label
-        ><label class="check"
-          ><input
-            type="checkbox"
-            bind:checked={snapshot.settings.readChat}
-          />Read viewer chat aloud</label
-        >
-        <h3>Available voices <span class="count">{voices.length}</span></h3>
-        <input
-          aria-label="Search voices"
-          bind:value={voiceSearch}
-          placeholder="Search name, voice, or locale"
-        />
-        <div class="voice-list">
-          {#each voices.slice(0, 150) as voice}<div>
-              <strong>{voice.name ?? voice.id}</strong><small
-                >{voice.voiceName} · rate {voice.rate} · pitch {voice.pitch} · {voice.expression}</small
-              >
-            </div>{/each}
-        </div>
-        <p class="empty-note">
-          Viewers can use <code>!voice random</code>,
-          <code>!voice &lt;name&gt;</code>, or
-          <code>!voices &lt;search&gt;</code>.
-        </p>
-      {:else if section === "overlay"}
-        <h3>Bumblebee’s place on your stream</h3>
-        <p class="section-intro">
-          Positions and sizes are fractions of the overlay viewport. Save to
-          update the desktop preview and connected OBS sources immediately.
-        </p>
-        <label class="check"
-          ><input
-            type="checkbox"
-            bind:checked={snapshot.overlaySettings.beeVisible}
-          />Show Bumblebee</label
-        >
-        <label
-          >Horizontal position<input
-            type="range"
-            min="0"
-            max="1"
-            step=".01"
-            bind:value={snapshot.overlaySettings.beeX}
-          /></label
-        >
-        <label
-          >Vertical position<input
-            type="range"
-            min="0"
-            max="1"
-            step=".01"
-            bind:value={snapshot.overlaySettings.beeY}
-          /></label
-        >
-        <label
-          >Size<input
-            type="range"
-            min=".05"
-            max=".8"
-            step=".01"
-            bind:value={snapshot.overlaySettings.beeScale}
-          /></label
-        >
-        <h3>Chat puppets</h3>
-        <label class="check"
-          ><input
-            type="checkbox"
-            bind:checked={snapshot.overlaySettings.puppetsVisible}
-          />Show chat puppets</label
-        >
-        <label
-          >Group position<input
-            type="range"
-            min="0"
-            max="1"
-            step=".01"
-            bind:value={snapshot.overlaySettings.puppetHorizontal}
-          /></label
-        >
-        <label
-          >Puppet size<input
-            type="range"
-            min=".05"
-            max=".8"
-            step=".01"
-            bind:value={snapshot.overlaySettings.puppetScale}
-          /></label
-        >
-        <label
-          >Part hidden below the screen<input
-            type="range"
-            min=".1"
-            max="1"
-            step=".01"
-            bind:value={snapshot.overlaySettings.puppetOcclusion}
-          /></label
-        >
-        <label class="check"
-          ><input
-            type="checkbox"
-            bind:checked={snapshot.overlaySettings.bubblesVisible}
-          />Show speech bubbles</label
-        >
-      {:else}
-        <section class="settings-card">
-          <h3>OBS overlay</h3>
-          <p>
-            Only rendering assets, sound, and events are exposed on loopback.
-            Changing the token disconnects current overlays; paste the new URL
-            into OBS.
-          </p>
-          <label
-            >Local port<input
-              type="number"
-              min="1024"
-              max="65535"
-              bind:value={snapshot.settings.overlayPort}
-            /></label
-          ><small>Port changes apply the next time Bumblebee starts.</small>
-          <div class="button-row">
-            <button
-              disabled={!!busy}
-              onclick={() =>
-                run("Rotating token", async () => {
-                  snapshot!.overlayUrl = await invoke("rotate_overlay_token");
-                  notice = "Overlay token replaced. Copy the new URL into OBS.";
-                })}>Replace overlay token</button
-            ><button
-              onclick={() =>
-                navigator.clipboard.writeText(snapshot!.overlayUrl)}
-              >Copy URL</button
-            >
-          </div>
-        </section>
-        <section class="settings-card">
-          <h3>On this computer</h3>
-          <label class="check"
-            ><input
-              type="checkbox"
-              checked={autostart}
-              onchange={(e) =>
-                run("Updating autostart", async () => {
-                  if (e.currentTarget.checked) await enable();
-                  else await disable();
-                  autostart = await isEnabled();
-                })}
-            />Start Bumblebee when I log in</label
-          >
-          <p>
-            Closing the window keeps an active session in the system tray.
-            Choose Quit from the tray to disconnect and stop audio.
-          </p>
-          <button
-            disabled={!!busy}
-            onclick={() => run("Quitting", () => invoke("quit_app"))}
-            >Quit Bumblebee</button
           >
         </section>
       {/if}
-    </div>
-    <div class="drawer-footer">
-      <span>{busy || "Connection changes reconnect an active session."}</span
-      ><button
-        class="primary"
+    {:else if section === "audio"}
+      <AudioSettings
+        settings={snapshot.settings}
+        voices={snapshot.voices}
+        busy={!!busy}
+        onPreview={() =>
+          run("Previewing speech", async () => {
+            await save();
+            await invoke("preview_speech", { text: previewText });
+          })}
+      />
+      <section class="settings-card">
+        <h3>Azure Speech</h3>
+        <p>Natural voices for Bumblebee and your chatters.</p>
+        <label
+          >Resource region<input
+            bind:value={snapshot.settings.azureRegion}
+            placeholder="eastus"
+          /></label
+        ><label
+          >Speech key<input
+            type="password"
+            autocomplete="off"
+            bind:value={secretInputs.azure_speech}
+            placeholder={snapshot.secrets.azure_speech
+              ? "Saved in keyring • enter a replacement"
+              : "Paste your Speech resource key"}
+          /></label
+        >
+        <div class="button-row">
+          <button
+            disabled={!!busy || !secretInputs.azure_speech}
+            onclick={() => run("Saving key", () => saveSecret("azure_speech"))}
+            >Save key</button
+          ><button
+            disabled={!!busy}
+            onclick={() =>
+              run("Validating Speech", () => validate("azure_speech"))}
+            >Validate & refresh voices</button
+          ><button
+            class="subtle"
+            onclick={() =>
+              openUrl(
+                "https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices",
+              )}>Create Speech resource ↗</button
+          >
+        </div>
+      </section>
+    {:else if section === "ai"}
+      <section class="settings-card">
+        <h3>OpenAI</h3>
+        <p>Bumblebee’s thoughts, tools, and memories.</p>
+        <label
+          >API key<input
+            type="password"
+            autocomplete="off"
+            bind:value={secretInputs.openai}
+            placeholder={snapshot.secrets.openai
+              ? "Saved in keyring • enter a replacement"
+              : "Paste your API key"}
+          /></label
+        >
+        <div class="button-row">
+          <button
+            disabled={!!busy || !secretInputs.openai}
+            onclick={() => run("Saving key", () => saveSecret("openai"))}
+            >Save key</button
+          ><button
+            disabled={!!busy}
+            onclick={() => run("Validating OpenAI", () => validate("openai"))}
+            >Validate</button
+          >
+        </div>
+      </section>
+
+      <AiSettings
+        settings={snapshot.settings}
+        busy={!!busy}
+        {models}
+        onLoadModels={() => run("Loading models", loadModels)}
+      />
+    {:else if section === "library"}
+      <LibrarySettings
+        {library}
+        busy={!!busy}
+        {invoke}
+        {run}
+        onRefresh={loadLibrary}
+      />
+    {:else if section === "overlay"}
+      <p>
+        These controls edit the same layout shown on the dashboard and in OBS.
+      </p>
+      <label
+        >Element<select bind:value={overlaySubject}
+          >{#each Object.entries(subjectLabels) as [id, label]}<option
+              value={id}>{label}</option
+            >{/each}</select
+        ></label
+      >
+      <OverlayControls
+        settings={snapshot.overlaySettings}
+        subject={overlaySubject}
+        onCommit={commitOverlay}
+      />
+    {:else if section === "puppets"}
+      <label class="check"
+        ><input
+          type="checkbox"
+          bind:checked={snapshot.settings.customImagesEnabled}
+        />Allow viewers to submit custom puppet images for approval</label
+      >
+      <p class="section-intro">
+        Viewers use <code>!puppet</code> and <code>!voice</code> in chat. Images remain
+        on their current puppet until you approve the exact downloaded image below.
+      </p>
+      <h3>
+        Awaiting your approval <span class="count"
+          >{snapshot.pendingImages.length}</span
+        >
+      </h3>
+      {#if snapshot.pendingImages.length > 30}<p class="empty-note">
+          Showing the first 30 submissions. Reviewing these reveals the next
+          submissions.
+        </p>{/if}
+      {#each snapshot.pendingImages.slice(0, 30) as submission (submission.id)}<div
+          class="submission"
+        >
+          <PendingImage id={submission.id} name={submission.displayName} />
+          <div>
+            <strong>{submission.displayName}</strong><small
+              >{submission.platform} · {new Date(
+                submission.submittedAt,
+              ).toLocaleString()}</small
+            >
+            <div class="button-row">
+              <button
+                class="primary compact"
+                disabled={!!busy}
+                onclick={() =>
+                  run("Approving image", async () => {
+                    await invoke("review_image", {
+                      id: submission.id,
+                      approve: true,
+                    });
+                    await refresh();
+                  })}>Approve</button
+              ><button
+                disabled={!!busy}
+                onclick={() =>
+                  run("Rejecting image", async () => {
+                    await invoke("review_image", {
+                      id: submission.id,
+                      approve: false,
+                    });
+                    await refresh();
+                  })}>Reject</button
+              >
+            </div>
+          </div>
+        </div>{:else}<p class="empty-note">
+          No images waiting for approval.
+        </p>{/each}
+      <h3>Chatter profiles</h3>
+      <form
+        class="search-row"
+        onsubmit={(e) => {
+          e.preventDefault();
+          void run("Searching", async () => {
+            snapshot!.chatters = await invoke("search_chatters", {
+              search: profileSearch,
+            });
+          });
+        }}
+      >
+        <input
+          bind:value={profileSearch}
+          placeholder="Search by display name"
+          aria-label="Search chatter profiles"
+        /><button disabled={!!busy}>Search</button>
+      </form>
+      {#each snapshot.chatters as chatter}<div class="profile">
+          <img
+            src={picture(chatter)}
+            alt=""
+            onerror={(event) => {
+              const fallback =
+                assetBase + `puppets/images/${chatter.puppetId}.png`;
+              const img = event.currentTarget as HTMLImageElement;
+              if (img.src !== fallback) img.src = fallback;
+            }}
+          />
+          <div class="profile-details">
+            <strong>{chatter.displayName}</strong><small
+              >{chatter.platform} · {chatter.voiceId}</small
+            >
+            <div class="button-row">
+              <select
+                aria-label={`Puppet for ${chatter.displayName}`}
+                value={chatter.puppetId}
+                onchange={(e) =>
+                  run("Updating puppet", () =>
+                    updateChatter(chatter, {
+                      puppetId: e.currentTarget.value,
+                    }),
+                  )}
+                >{#each snapshot.puppets as puppet}<option value={puppet.id}
+                    >{puppet.name}</option
+                  >{/each}</select
+              ><button
+                disabled={!!busy}
+                onclick={() =>
+                  run("Resetting puppet", () =>
+                    updateChatter(chatter, { puppetId: chatter.puppetId }),
+                  )}>Reset image</button
+              ><button
+                disabled={!!busy}
+                onclick={() =>
+                  run("Changing permissions", () =>
+                    updateChatter(chatter, {
+                      blocked: !chatter.customizationBlocked,
+                    }),
+                  )}
+                >{chatter.customizationBlocked
+                  ? "Unblock changes"
+                  : "Block changes"}</button
+              >
+            </div>
+            <ChatterOverrides
+              {chatter}
+              busy={!!busy}
+              onSave={async (overrides) => {
+                await updateChatter(chatter, { overrides });
+              }}
+            />
+          </div>
+        </div>{:else}<p class="empty-note">
+          Profiles appear when viewers first participate.
+        </p>{/each}
+    {:else if section === "voices"}
+      <h3>Bumblebee’s voice</h3>
+      <p class="section-intro">
+        Bumblebee keeps her own voice. Viewer randomization draws from the
+        puppet presets and the regional English catalog.
+      </p>
+      <label
+        >Companion voice<select bind:value={snapshot.settings.bumblebeeVoice}
+          >{#each snapshot.voices.filter((v) => v.role === "bumblebee") as voice}<option
+              value={voice.id}
+              >{voice.name ?? voice.id} · {voice.voiceName}</option
+            >{/each}</select
+        ></label
+      ><label class="check"
+        ><input type="checkbox" bind:checked={snapshot.settings.readChat} />Read
+        viewer chat aloud</label
+      >
+      <h3>Available voices <span class="count">{voices.length}</span></h3>
+      <input
+        aria-label="Search voices"
+        bind:value={voiceSearch}
+        placeholder="Search name, voice, or locale"
+      />
+      <div class="voice-list">
+        {#each voices.slice(0, 150) as voice}<div>
+            <strong>{voice.name ?? voice.id}</strong><small
+              >{voice.voiceName} · rate {voice.rate} · pitch {voice.pitch} · {voice.expression}</small
+            >
+          </div>{/each}
+      </div>
+      <p class="empty-note">
+        Viewers can use <code>!voice random</code>,
+        <code>!voice &lt;name&gt;</code>, or
+        <code>!voices &lt;search&gt;</code>.
+      </p>
+    {:else if section === "application"}
+      <section class="settings-card">
+        <h3>OBS overlay</h3>
+        <p>
+          Only rendering assets, sound, and events are exposed on loopback.
+          Changing the token disconnects current overlays; paste the new URL
+          into OBS.
+        </p>
+        <label
+          >Local port<input
+            type="number"
+            min="1024"
+            max="65535"
+            bind:value={snapshot.settings.overlayPort}
+          /></label
+        ><small>Port changes apply the next time Bumblebee starts.</small>
+        <div class="button-row">
+          <button
+            disabled={!!busy}
+            onclick={() =>
+              run("Rotating token", async () => {
+                snapshot!.overlayUrl = await invoke("rotate_overlay_token");
+                notice = "Overlay token replaced. Copy the new URL into OBS.";
+              })}>Replace overlay token</button
+          ><button
+            onclick={() => navigator.clipboard.writeText(snapshot!.overlayUrl)}
+            >Copy URL</button
+          >
+        </div>
+      </section>
+      <section class="settings-card">
+        <h3>On this computer</h3>
+        <label class="check"
+          ><input
+            type="checkbox"
+            checked={autostart}
+            onchange={(e) =>
+              run("Updating autostart", async () => {
+                if (e.currentTarget.checked) await enable();
+                else await disable();
+                autostart = await isEnabled();
+              })}
+          />Start Bumblebee when I log in</label
+        >
+        <p>
+          Closing the window keeps an active session in the system tray. Choose
+          Quit from the tray to disconnect and stop audio.
+        </p>
+        <button
+          disabled={!!busy}
+          onclick={() => run("Quitting", () => invoke("quit_app"))}
+          >Quit Bumblebee</button
+        >
+      </section>
+      <section class="settings-card">
+        <h3>Saved credentials</h3>
+        <p>
+          Remove a saved key or authorization to disconnect it. This stops the
+          active session.
+        </p>
+        {#each [["azure_speech", "Azure Speech key"], ["openai", "OpenAI key"], ["discord_bot", "Discord bot token"], ["google_client_secret", "Google client secret"], ["twitch_tokens", "Twitch authorization"], ["google_tokens", "YouTube authorization"]] as [name, label]}
+          {#if snapshot.secrets[name]}
+            <div class="credential-row">
+              <span>{label}</span><button
+                class="compact"
+                disabled={!!busy}
+                onclick={() =>
+                  run("Removing credential", async () => {
+                    await invoke("delete_secret", { name });
+                    await refresh();
+                    notice = `${label} removed from this computer.`;
+                  })}>Remove</button
+              >
+            </div>
+          {/if}
+        {/each}
+      </section>
+    {/if}
+    {#if snapshot && ["audio", "ai", "discord", "twitch", "youtube", "application"].includes(section)}
+      {#key section}<ResetPreferences
+          scope={section === "application" ? "all" : (section as ResetScope)}
+          busy={!!busy}
+          onReset={resetPreferences}
+        />{/key}
+    {/if}
+  </fieldset>
+  {#snippet footer()}
+    <div class="settings-footer-actions">
+      <span>{busy || "Settings save automatically."}</span><button
         disabled={!snapshot || !!busy}
-        onclick={() => run("Saving settings", save)}>Save settings</button
+        onclick={() => run("Saving settings", save)}
+        >{saveStatus === "error" ? "Retry save" : "Save now"}</button
       >
     </div>
-  </aside>
-{/if}
+  {/snippet}
+</SettingsDrawer>

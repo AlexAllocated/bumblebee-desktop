@@ -1,4 +1,5 @@
 //! Native provider clients. Tokens never cross the desktop command/event boundary.
+pub mod discovery;
 pub mod oauth;
 pub mod streaming;
 
@@ -70,6 +71,7 @@ pub struct Providers {
 	pub http: reqwest::Client,
 	pub status_events: broadcast::Sender<ProviderStatus>,
 	statuses: Mutex<BTreeMap<String, ProviderStatus>>,
+	stream_destinations: Mutex<BTreeMap<String, String>>,
 	echoes: Mutex<Vec<Arc<EchoAttempt>>>,
 	pub(crate) token_lock: Arc<tokio::sync::Mutex<()>>,
 	pub(crate) oauth_lock: Arc<tokio::sync::Mutex<()>>,
@@ -89,12 +91,30 @@ impl Providers {
 				.build()?,
 			status_events,
 			statuses: Mutex::new(BTreeMap::new()),
+			stream_destinations: Mutex::new(BTreeMap::new()),
 			echoes: Mutex::new(Vec::new()),
 			token_lock: Arc::new(tokio::sync::Mutex::new(())),
 			oauth_lock: Arc::new(tokio::sync::Mutex::new(())),
 			oauth_cancellation: Mutex::new(tokio_util::sync::CancellationToken::new()),
 		}))
 	}
+	pub fn stream_chat_destination(&self, platform: &str) -> Option<String> {
+		self
+			.stream_destinations
+			.lock()
+			.unwrap()
+			.get(platform)
+			.cloned()
+	}
+	pub(crate) fn set_stream_chat_destination(&self, platform: &str, channel: Option<&str>) {
+		let mut destinations = self.stream_destinations.lock().unwrap();
+		if let Some(channel) = channel {
+			destinations.insert(platform.into(), channel.into());
+		} else {
+			destinations.remove(platform);
+		}
+	}
+
 	/// Invalidate a pending browser flow before changing its configuration.
 	pub fn cancel_authorizations(&self) {
 		let mut token = self.oauth_cancellation.lock().unwrap();

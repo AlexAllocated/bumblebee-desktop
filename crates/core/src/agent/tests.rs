@@ -150,6 +150,7 @@ fn source(text: &str) -> ChatMessage {
 		channel_id: "room".into(),
 		text: text.into(),
 		is_owner: true,
+		access: Default::default(),
 	}
 }
 fn calls(names: &[(&str, &str)]) -> Value {
@@ -181,6 +182,7 @@ fn checkpoint_source(host: &FixtureHost, input: ChatMessage) -> Checkpoint {
 		answer: None,
 		approved_call: None,
 		voice_channel_id: None,
+		owner_context: false,
 	};
 	host
 		.store
@@ -816,13 +818,37 @@ async fn self_disable_keeps_its_success_receipt_and_stops_later_runtime_boundari
 	)
 	.unwrap();
 	let host = RuntimeHost { engine };
-	let disable_args = json!({"model":null,"enabled":false});
+	let mut disable_args = json!({});
+	for key in tools::definitions()
+		.iter()
+		.find(|d| d.name == "setAiSettings")
+		.unwrap()
+		.parameters["properties"]
+		.as_object()
+		.unwrap()
+		.keys()
+	{
+		disable_args[key] = Value::Null;
+	}
+	disable_args["enabled"] = json!(false);
 	let disable = ToolCall {
 		id: "self-disable".into(),
 		name: "setAiSettings".into(),
 		arguments: disable_args.to_string(),
 	};
-	let later_args = json!({"enabled":false});
+	let mut later_args = json!({});
+	for key in tools::definitions()
+		.iter()
+		.find(|d| d.name == "setChatTtsSettings")
+		.unwrap()
+		.parameters["properties"]
+		.as_object()
+		.unwrap()
+		.keys()
+	{
+		later_args[key] = Value::Null;
+	}
+	later_args["enabled"] = json!(false);
 	let later = ToolCall {
 		id: "later-change".into(),
 		name: "setChatTtsSettings".into(),
@@ -853,6 +879,7 @@ async fn self_disable_keeps_its_success_receipt_and_stops_later_runtime_boundari
 		answer: None,
 		approved_call: None,
 		voice_channel_id: None,
+		owner_context: false,
 	};
 	store
 		.create_turn(
@@ -907,5 +934,104 @@ async fn self_disable_keeps_its_success_receipt_and_stops_later_runtime_boundari
 			.to_string()
 			.contains("agent is disabled")
 	);
-	assert!(received.try_recv().is_err());
+	while let Ok(event) = received.try_recv() {
+		assert!(
+			matches!(&event, crate::model::OverlayEvent::AudioSettings { .. })
+				|| matches!(&event,crate::model::OverlayEvent::VoiceTranscript{text,..} if text.is_empty()),
+			"Disabling AI must not deliver chat or speech"
+		);
+	}
+}
+
+#[tokio::test]
+async fn desktop_memories_follow_verified_owner_identity_without_becoming_viewer_context() {
+	use crate::providers::{Providers, SecretStore};
+	struct TokenIdentity(Mutex<String>);
+	impl SecretStore for TokenIdentity {
+		fn get(&self, key: &str) -> Result<Option<String>> {
+			ensure!(
+				key == "twitch_tokens",
+				"Revoked owner context must stop before OpenAI credential access"
+			);
+			Ok(Some(json!({"access_token":"offline-fixture","refresh_token":"","expires_at":crate::now_ms()+600000,"scopes":["user:read:chat","user:write:chat"],"account_id":self.0.lock().unwrap().clone(),"login":"fixture","client_id":"client","validated":true}).to_string()))
+		}
+		fn set(&self, _: &str, _: &str) -> Result<()> {
+			bail!("No credential writes in this test")
+		}
+		fn delete(&self, _: &str) -> Result<()> {
+			bail!("No credential writes in this test")
+		}
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let store = Arc::new(Store::open(&dir.path().join("app.db")).unwrap());
+	store.patch_settings(&json!({"aiEnabled":true,"twitchClientId":"client","chatPlatforms":{"twitch":{"mentions":{"everyone":true}}}})).unwrap();
+	store
+		.remember("preview:owner", "Streamer-only dashboard note")
+		.unwrap();
+	store
+		.remember("twitch:123", "Requester-specific note")
+		.unwrap();
+	store
+		.remember("twitch:456", "Viewer-specific note")
+		.unwrap();
+	let keys = Arc::new(TokenIdentity(Mutex::new("123".into())));
+	let providers = Providers::new(store.clone(), keys.clone()).unwrap();
+	let (events, _) = tokio::sync::broadcast::channel(16);
+	let engine = Engine::new(
+		providers,
+		crate::runtime::EnginePaths {
+			data_dir: dir.path().into(),
+			native_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+				.join("../../src-tauri/resources"),
+		},
+		events,
+	)
+	.unwrap();
+	let host = RuntimeHost { engine };
+	let mut owner_source = source("remembered context");
+	owner_source.platform = "twitch".into();
+	owner_source.user_id = "123".into();
+	owner_source.is_owner = true;
+	let verified = host.owner(&owner_source).await.unwrap();
+	assert!(verified);
+	let (memory, private) = context_memories(&store, &owner_source, verified).unwrap();
+	assert!(private);
+	assert_eq!(memory.len(), 2);
+	assert!(!memory.iter().any(|m| m.actor == "twitch:456"));
+	let mut viewer = owner_source.clone();
+	viewer.user_id = "456".into();
+	let (memory, private) =
+		context_memories(&store, &viewer, host.owner(&viewer).await.unwrap()).unwrap();
+	assert!(!private);
+	assert_eq!(memory.len(), 1);
+	assert_eq!(memory[0].actor, "twitch:456");
+	let fixture = FixtureHost::new(&dir.path().join("fixture.db"), vec![]);
+	let mut cp = checkpoint_source(&fixture, owner_source);
+	cp.owner_context = true;
+	// A different freshly authorized account replaces the old provider identity.
+	*keys.0.lock().unwrap() = "789".into();
+	assert!(cp.source.is_owner);
+	assert!(!host.owner(&cp.source).await.unwrap());
+	let error = host
+		.request(&cp, &[], true, CancellationToken::new())
+		.await
+		.unwrap_err();
+	assert!(error.to_string().contains("Owner identity changed"));
+	assert!(
+		host
+			.finish(
+				&cp,
+				&FinalReply {
+					text: "Private reply".into(),
+					messages: None
+				},
+				CancellationToken::new()
+			)
+			.await
+			.unwrap_err()
+			.to_string()
+			.contains("Owner identity changed")
+	);
+	let restored: Checkpoint = serde_json::from_value(serde_json::to_value(&cp).unwrap()).unwrap();
+	assert!(restored.owner_context);
 }

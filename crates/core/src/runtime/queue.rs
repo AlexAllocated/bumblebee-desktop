@@ -94,6 +94,7 @@ mod tests {
 			channel_id: "stream".into(),
 			text: "!bee test".into(),
 			is_owner: false,
+			access: Default::default(),
 		}
 	}
 	async fn interrupted_queue(actor_only: bool) {

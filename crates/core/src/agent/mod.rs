@@ -88,6 +88,8 @@ pub struct Checkpoint {
 	pub approved_call: Option<String>,
 	#[serde(default)]
 	pub voice_channel_id: Option<String>,
+	#[serde(default)]
+	pub owner_context: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -240,6 +242,7 @@ pub fn desktop_answer_message(store: &Store, id: &str, answer: &str) -> Result<C
 		channel_id: id.into(),
 		text: format!("!answer {id} {answer}"),
 		is_owner: true,
+		access: Default::default(),
 	})
 }
 pub async fn run(
@@ -261,18 +264,31 @@ pub async fn run(
 		"AI is disabled in Settings"
 	);
 	let settings = host.engine.store.settings()?;
+
+	let scope = durable::conversation_scope(&message);
+	let overrides = host
+		.store()
+		.chatter(durable::platform(&message.platform), &message.user_id)
+		.map(|c| c.overrides)
+		.unwrap_or_default();
+	let selected_model = settings.selected_model(&message, &overrides);
 	ensure!(
-		!settings.openai_model.is_empty(),
+		!selected_model.is_empty(),
 		"Choose an OpenAI model in Settings"
 	);
-	let scope = durable::conversation_scope(&message);
-	let context = json!({"history":host.store().history(&scope)?,"memories":host.store().memories(&durable::actor(&message),false)?,"displayName":message.display_name,"platform":message.platform,"request":message.text});
+	let verified_owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled before memory access"),owner=host.owner(&message)=>owner?};
+	let (memories, owner_context) = if settings.ai_memories_enabled {
+		context_memories(host.store(), &message, verified_owner)?
+	} else {
+		(Vec::new(), false)
+	};
+	let context = json!({"history":host.store().history(&scope)?,"memories":memories,"displayName":message.display_name,"platform":message.platform,"request":message.text});
 	let voice_channel_id =
 		(message.platform == "discord_voice").then_some(settings.discord_voice_channel_id.clone());
 	let mut cp = Checkpoint {
 		id: uuid::Uuid::new_v4().to_string(),
 		source: message,
-		model: settings.openai_model,
+		model: selected_model,
 		items: vec![json!({"role":"user","content":context.to_string()})],
 		rounds: 0,
 		executed: 0,
@@ -285,6 +301,7 @@ pub async fn run(
 		answer: None,
 		approved_call: None,
 		voice_channel_id,
+		owner_context,
 	};
 	host.store().create_turn(
 		&cp.id,
@@ -295,6 +312,29 @@ pub async fn run(
 		.store()
 		.append_history(&scope, "user", &cp.source.text)?;
 	run_guarded(&host, &mut cp, cancel).await
+}
+
+fn context_memories(
+	store: &Store,
+	source: &ChatMessage,
+	verified_owner: bool,
+) -> Result<(Vec<durable::Memory>, bool)> {
+	let actor = durable::actor(source);
+	let mut memories = store.memories(&actor, false)?;
+	let mut owner_context = false;
+	if verified_owner && actor != "preview:owner" {
+		let shared = store.memories("preview:owner", false)?;
+		owner_context = !shared.is_empty();
+		memories.extend(shared);
+	}
+	Ok((memories, owner_context))
+}
+fn require_context_owner(cp: &Checkpoint, owner: bool) -> Result<()> {
+	ensure!(
+		!cp.owner_context || owner,
+		"Owner identity changed; private owner context cannot continue under this identity"
+	);
+	Ok(())
 }
 
 pub async fn handle_pending(
@@ -366,31 +406,64 @@ impl RuntimeHost {
 impl Host for RuntimeHost {
 	async fn reply_route(&self, cp: &Checkpoint, owner: bool) -> Result<ReplyRoute> {
 		self.require_enabled()?;
+		require_context_owner(cp, self.owner(&cp.source).await?)?;
 		delivery::reply_route(&self.engine, cp, owner).await
 	}
 	fn store(&self) -> &Store {
 		&self.engine.store
 	}
 	fn definitions(&self) -> Vec<ToolDefinition> {
-		tools::definitions()
+		self
+			.engine
+			.store
+			.settings()
+			.map(|settings| {
+				tools::definitions()
+					.into_iter()
+					.filter(|d| crate::settings::tool_enabled(&settings, &d.name))
+					.collect()
+			})
+			.unwrap_or_default()
 	}
 	async fn owner(&self, source: &ChatMessage) -> Result<bool> {
 		self.require_enabled()?;
 		let owner = is_owner(&self.engine, source).await?;
 		self.require_enabled()?;
+		let settings = self.engine.store.settings()?;
+		let overrides = self
+			.engine
+			.store
+			.chatter(durable::platform(&source.platform), &source.user_id)
+			.map(|c| c.overrides)
+			.unwrap_or_default();
+		ensure!(
+			settings.permits_ai(source, &overrides, owner),
+			"This requester no longer has permission to use the agent"
+		);
 		Ok(owner)
 	}
 	async fn request(
 		&self,
 		cp: &Checkpoint,
 		defs: &[ToolDefinition],
-		owner: bool,
+		_owner: bool,
 		cancel: CancellationToken,
 	) -> Result<Value> {
 		self.require_enabled()?;
 		validate_voice_context(&self.engine, cp).await?;
+		let owner = self.owner(&cp.source).await?;
+		require_context_owner(cp, owner)?;
 		self.require_enabled()?;
-		model::request(&self.engine, cp, defs, owner, cancel).await
+		self
+			.engine
+			.while_thinking(
+				cp.delivery
+					.as_ref()
+					.is_some_and(|d| d.speech && d.public_progress),
+				cancel.clone(),
+				model::request(&self.engine, cp, defs, owner, cancel),
+			)
+			.await
 	}
 	async fn execute(
 		&self,
@@ -401,6 +474,8 @@ impl Host for RuntimeHost {
 	) -> Result<Value> {
 		self.require_enabled()?;
 		validate_voice_context(&self.engine, cp).await?;
+		let owner = self.owner(&cp.source).await?;
+		require_context_owner(cp, owner)?;
 		self.require_enabled()?;
 		tools::execute(&self.engine, cp, call, args, cancel).await
 	}
@@ -411,6 +486,7 @@ impl Host for RuntimeHost {
 		cancel: CancellationToken,
 	) -> Result<()> {
 		self.require_enabled()?;
+		require_context_owner(cp, self.owner(&cp.source).await?)?;
 		delivery::prompt(&self.engine, cp, pending, cancel).await
 	}
 	async fn finish(
@@ -421,6 +497,8 @@ impl Host for RuntimeHost {
 	) -> Result<Value> {
 		self.require_enabled()?;
 		validate_voice_context(&self.engine, cp).await?;
+		let owner = self.owner(&cp.source).await?;
+		require_context_owner(cp, owner)?;
 		self.require_enabled()?;
 		delivery::finish(&self.engine, cp, reply, cancel).await
 	}
@@ -480,6 +558,7 @@ async fn resume<H: Host>(
 		"Enable the agent to answer this pending request"
 	);
 	let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
+	require_context_owner(&cp, owner)?;
 	ensure!(
 		!cancel.is_cancelled(),
 		"Request cancelled after permission check"
@@ -633,6 +712,7 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 				"Delivery must be configured before executing actions"
 			);
 			let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
+			require_context_owner(cp, owner)?;
 			ensure!(
 				!cancel.is_cancelled(),
 				"Request cancelled after permission check"
@@ -757,6 +837,7 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 		}
 		ensure!(cp.rounds < 24, "This request reached its model round limit");
 		let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
+		require_context_owner(cp, owner)?;
 		ensure!(
 			!cancel.is_cancelled(),
 			"Request cancelled after permission check"
@@ -823,6 +904,13 @@ pub async fn reminder_loop(engine: Arc<Engine>, cancel: CancellationToken) {
 	loop {
 		tokio::select! {_=cancel.cancelled()=>break,_=tick.tick()=>{}}
 		for _ in 0..16 {
+			if !engine
+				.store
+				.settings()
+				.is_ok_and(|s| s.ai_enabled && s.ai_reminders_enabled)
+			{
+				break;
+			}
 			if cancel.is_cancelled() {
 				return;
 			}

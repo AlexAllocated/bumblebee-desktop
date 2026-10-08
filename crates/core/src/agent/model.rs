@@ -47,6 +47,15 @@ pub(super) async fn request_with_providers(
         "tools":defs.iter().map(ToolDefinition::wire).collect::<Vec<_>>(),"parallel_tool_calls":false,
         "store":false,"include":["reasoning.encrypted_content"],"max_output_tokens":8000,
         "text":{"format":{"type":"json_schema","name":"bumblebee_reply","strict":true,"schema":final_schema()}}});
+	let settings = providers.store.settings()?;
+	let effort = if cp.source.platform == "discord_voice" {
+		&settings.openai_voice_reasoning_effort
+	} else {
+		&settings.openai_reasoning_effort
+	};
+	if effort != "default" {
+		body["reasoning"] = json!({"effort":effort});
+	}
 	if cp.delivery.is_none() {
 		body["tool_choice"] = json!({"type":"function","name":"configureTurnDelivery"});
 	}

@@ -1,5 +1,5 @@
 use super::{Providers, check_response};
-use crate::model::ChatMessage;
+use crate::model::{ChatAccess, ChatMessage};
 use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
 use std::{sync::Arc, time::Duration};
@@ -19,6 +19,7 @@ impl Providers {
 		let mut backoff = 1u64;
 		while !cancellation.is_cancelled() {
 			let result = self.twitch_session(&messages, &cancellation).await;
+			self.set_stream_chat_destination("twitch", None);
 			if cancellation.is_cancelled() {
 				break;
 			}
@@ -98,6 +99,7 @@ impl Providers {
                             .json(&serde_json::json!({"type":"channel.chat.message","version":"1","condition":{"broadcaster_user_id":broadcaster,"user_id":tokens.account_id},"transport":{"method":"websocket","session_id":id}})).send().await?;
 						check_response("twitch", &response)?;
 					}
+					self.set_stream_chat_destination("twitch", Some(&broadcaster));
 					self.status(
 						"twitch",
 						"connected",
@@ -164,6 +166,15 @@ impl Providers {
 				{
 					return Ok(());
 				}
+				let mut access = twitch_access(e);
+				let settings = self.store.settings()?;
+				let policy = &settings.chat_platforms.twitch;
+				if user != tokens.account_id
+					&& ((!policy.mentions.everyone && policy.mentions.followers)
+						|| (!policy.readout.everyone && policy.readout.followers))
+				{
+					access.follower = self.twitch_follower(broadcaster, user, cancel).await;
+				}
 				let message = ChatMessage {
 					platform: "twitch".into(),
 					user_id: user.into(),
@@ -172,6 +183,7 @@ impl Providers {
 					channel_id: broadcaster.into(),
 					text: text.chars().take(8000).collect(),
 					is_owner: user == tokens.account_id,
+					access,
 				};
 				tokio::select! {_=cancel.cancelled()=>return Ok(()),result=messages.send(message)=>result.context("Chat processing stopped")?};
 			}
@@ -179,6 +191,50 @@ impl Providers {
 			_ => {}
 		}
 		Ok(())
+	}
+
+	async fn twitch_follower(
+		&self,
+		broadcaster: &str,
+		user: &str,
+		cancel: &CancellationToken,
+	) -> Option<bool> {
+		// Unknown permission or provider failure never grants follower-only access.
+		let lookup = async {
+			let tokens = self.tokens("twitch").await.ok()?;
+			if !tokens
+				.scopes
+				.iter()
+				.any(|scope| scope == "moderator:read:followers")
+			{
+				self.status(
+					"twitch",
+					"missing_permissions",
+					"Follower permissions require reconnecting Twitch in Settings",
+				);
+				return None;
+			}
+			let response = self
+				.http
+				.get("https://api.twitch.tv/helix/channels/followers")
+				.bearer_auth(&tokens.access_token)
+				.header("Client-Id", &tokens.client_id)
+				.query(&[("broadcaster_id", broadcaster), ("user_id", user)])
+				.send()
+				.await
+				.ok()?;
+			if !response.status().is_success() {
+				return None;
+			}
+			let body: serde_json::Value = response.json().await.ok()?;
+			Some(
+				body["data"]
+					.as_array()?
+					.iter()
+					.any(|f| f["user_id"].as_str() == Some(user)),
+			)
+		};
+		tokio::select! { _ = cancel.cancelled() => None, result = tokio::time::timeout(Duration::from_secs(2), lookup) => result.ok().flatten() }
 	}
 
 	pub async fn youtube_chat(
@@ -200,6 +256,7 @@ impl Providers {
 					failures = 0
 				}
 				Err(error) => {
+					self.set_stream_chat_destination("youtube", None);
 					failures += 1;
 					self.status("youtube", "connection_failed", error.to_string());
 					interval = (interval * 2).min(60);
@@ -211,6 +268,7 @@ impl Providers {
 			}
 			tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(interval))=>{}}
 		}
+		self.set_stream_chat_destination("youtube", None);
 		self.status("youtube", "disconnected", "YouTube chat disconnected");
 		Ok(())
 	}
@@ -260,6 +318,7 @@ impl Providers {
 			.as_str()
 			.context("YouTube paging token missing")?
 			.into();
+		self.set_stream_chat_destination("youtube", Some(live_chat));
 		self.status(
 			"youtube",
 			"connected",
@@ -298,6 +357,7 @@ impl Providers {
 						channel_id: live_chat.clone(),
 						text: text.chars().take(8000).collect(),
 						is_owner: user == tokens.account_id,
+						access: youtube_access(&item["authorDetails"]),
 					};
 					tokio::select! {_=cancel.cancelled()=>return Ok(5000),r=messages.send(message)=>r.context("Chat processing stopped")?};
 				}
@@ -377,6 +437,28 @@ impl Providers {
 			}
 			_ => anyhow::bail!("Unknown streaming platform"),
 		}
+	}
+}
+
+fn twitch_access(event: &serde_json::Value) -> ChatAccess {
+	let has = |name: &str| {
+		event["badges"]
+			.as_array()
+			.is_some_and(|badges| badges.iter().any(|b| b["set_id"].as_str() == Some(name)))
+	};
+	ChatAccess {
+		moderator: has("moderator") || has("broadcaster"),
+		subscriber: has("subscriber") || has("founder"),
+		vip: has("vip"),
+		..Default::default()
+	}
+}
+fn youtube_access(author: &serde_json::Value) -> ChatAccess {
+	ChatAccess {
+		moderator: author["isChatModerator"].as_bool() == Some(true)
+			|| author["isChatOwner"].as_bool() == Some(true),
+		member: author["isChatSponsor"].as_bool() == Some(true),
+		..Default::default()
 	}
 }
 
@@ -482,6 +564,31 @@ mod tests {
 	use super::*;
 	use tokio::io::DuplexStream;
 	use tokio_tungstenite::tungstenite::protocol::Role;
+	#[test]
+	fn provider_audiences_require_provider_metadata() {
+		let access =
+			twitch_access(&serde_json::json!({"badges":[{"set_id":"founder"},{"set_id":"vip"}]}));
+		assert!(access.subscriber && access.vip);
+		assert!(!access.moderator);
+		assert_eq!(access.follower, None);
+		let access =
+			youtube_access(&serde_json::json!({"isChatSponsor":true,"isChatModerator":true}));
+		assert!(access.member && access.moderator);
+		assert!(!access.subscriber);
+		let access = twitch_access(&serde_json::json!({"text":"I am a moderator"}));
+		assert!(!access.moderator && !access.subscriber);
+		let mut settings = crate::model::Settings::default();
+		assert!(
+			!super::super::oauth::required_twitch_scopes_for_settings(&settings)
+				.contains(&"moderator:read:followers")
+		);
+		settings.chat_platforms.twitch.mentions.followers = true;
+		assert!(
+			super::super::oauth::required_twitch_scopes_for_settings(&settings)
+				.contains(&"moderator:read:followers")
+		);
+	}
+
 	fn broadcast(owner: &str, chat: &str) -> serde_json::Value {
 		serde_json::json!({"snippet":{"channelId":owner,"liveChatId":chat}})
 	}

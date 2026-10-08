@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod artifacts;
 mod commands;
+mod management;
 mod secrets;
 mod smoke;
 mod transport;
@@ -113,6 +114,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 				}
 			})
 	});
+	#[cfg(dev)]
+	let native_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+	#[cfg(not(dev))]
+	let native_dir = app.path().resource_dir()?;
+	let engine = Engine::new(
+		providers.clone(),
+		EnginePaths {
+			data_dir: data.clone(),
+			native_dir,
+		},
+		events.clone(),
+	)?;
 	let transport = Arc::new(transport::OverlayTransport {
 		port: store.settings()?.overlay_port,
 		token,
@@ -123,18 +136,6 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 		assets,
 		shutdown: shutdown.clone(),
 	});
-	#[cfg(dev)]
-	let native_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
-	#[cfg(not(dev))]
-	let native_dir = app.path().resource_dir()?;
-	let engine = Engine::new(
-		providers.clone(),
-		EnginePaths {
-			data_dir: data,
-			native_dir,
-		},
-		events,
-	)?;
 	let (server, overlay_error) = match tauri::async_runtime::block_on(transport.clone().start()) {
 		Ok(server) => (Some(server), None),
 		Err(error) => (
@@ -236,6 +237,17 @@ fn main() {
 			commands::save_overlay_settings,
 			commands::get_activity,
 			commands::save_settings,
+			commands::patch_settings,
+			commands::patch_overlay_settings,
+			management::get_library,
+			management::save_memory,
+			management::delete_memory,
+			management::save_reminder,
+			management::cancel_reminder,
+			management::discord_guilds,
+			management::discord_options,
+			management::openai_models,
+			management::reset_preferences,
 			commands::set_secret,
 			commands::delete_secret,
 			commands::validate_provider,

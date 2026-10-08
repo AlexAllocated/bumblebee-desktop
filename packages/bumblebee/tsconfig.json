@@ -1,0 +1,21 @@
+{
+	"compilerOptions": {
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleDetection": "force",
+		"moduleResolution": "bundler",
+		"verbatimModuleSyntax": true,
+		"strict": true,
+		"customConditions": ["development"],
+		"skipLibCheck": true,
+		"types": ["bun"],
+		"noFallthroughCasesInSwitch": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noUncheckedIndexedAccess": false,
+		"noEmit": true
+	},
+	"include": ["src/**/*.ts"],
+	"exclude": ["dist", "node_modules"]
+}

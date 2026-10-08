@@ -125,7 +125,7 @@ pub async fn run(providers: Arc<Providers>, model_id: &str) -> Result<ProbeRepor
 		input_tokens: AtomicU64::new(0),
 		output_tokens: AtomicU64::new(0),
 	};
-	let source=ChatMessage { platform:"preview".into(),user_id:"owner".into(),display_name:"Local integration probe".into(),channel_id:"probe".into(),message_id:uuid::Uuid::new_v4().to_string(),is_owner:true,text:"Greet me in one short sentence as Bumblebee. Configure delivery with speech=false, publicProgress=false, targets=[\"source\"], discordDmUserId=null. Use no other tools; do not send any messages or create files.".into() };
+	let source=ChatMessage { platform:"preview".into(),user_id:"owner".into(),display_name:"Local integration probe".into(),channel_id:"probe".into(),message_id:uuid::Uuid::new_v4().to_string(),is_owner:true, access: Default::default(),text:"Greet me in one short sentence as Bumblebee. Configure delivery with speech=false, publicProgress=false, targets=[\"source\"], discordDmUserId=null. Use no other tools; do not send any messages or create files.".into() };
 	let mut cp = Checkpoint {
 		id: uuid::Uuid::new_v4().to_string(),
 		source: source.clone(),
@@ -142,6 +142,7 @@ pub async fn run(providers: Arc<Providers>, model_id: &str) -> Result<ProbeRepor
 		answer: None,
 		approved_call: None,
 		voice_channel_id: None,
+		owner_context: false,
 	};
 	host.store().create_turn(
 		&cp.id,

@@ -18,3 +18,7 @@
 
 __pycache__/
 *.pyc
+
+/packages/*/dist/
+/packages/*/node_modules/
+/tests/ui/node_modules/

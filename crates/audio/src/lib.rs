@@ -40,8 +40,18 @@ pub struct DiscordMessage {
 	pub user_id: String,
 	pub display_name: String,
 	pub text: String,
+	pub role_ids: Vec<String>,
+	pub moderator: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct VoiceParticipant {
+	pub user_id: String,
+	pub username: String,
+	pub role_ids: Vec<String>,
+	pub is_owner: bool,
+	pub voice_mentions_allowed: bool,
+}
 pub struct AudioRuntime {
 	session: Arc<session::Session>,
 	discord: Arc<discord::DiscordRuntime>,
@@ -92,6 +102,47 @@ impl AudioRuntime {
 		self.session.get_voice_binding().is_some()
 	}
 
+	pub fn participants(&self) -> Vec<VoiceParticipant> {
+		let state = self.session.state.lock();
+		let Some(presence) = state.presence.as_ref() else {
+			return Vec::new();
+		};
+		let guild = presence.guild_id.parse::<u64>().ok().and_then(|id| {
+			self
+				.discord
+				.cache
+				.guild(serenity::model::id::GuildId::new(id))
+		});
+		state
+			.voice_state
+			.as_ref()
+			.into_iter()
+			.flat_map(|voice| voice.participants.iter())
+			.map(|(id, p)| VoiceParticipant {
+				user_id: id.clone(),
+				username: p.username.clone(),
+				role_ids: id
+					.parse::<u64>()
+					.ok()
+					.and_then(|id| {
+						guild
+							.as_ref()
+							.and_then(|g| g.members.get(&serenity::model::id::UserId::new(id)))
+					})
+					.map(|m| m.roles.iter().map(ToString::to_string).collect())
+					.unwrap_or_default(),
+				is_owner: presence.owner_discord_id.as_deref() == Some(id.as_str()),
+				voice_mentions_allowed: p.voice_mentions_allowed,
+			})
+			.collect()
+	}
+	pub async fn revalidate_participant(&self, user_id: &str) -> Result<Option<Vec<String>>> {
+		self.ensure_running()?;
+		self
+			.discord
+			.revalidate_participant(&self.session, user_id)
+			.await
+	}
 	pub fn is_listen_allowed(&self, user_id: &str) -> bool {
 		self
 			.session
@@ -211,6 +262,33 @@ impl AudioRuntime {
 		}
 	}
 
+	pub fn set_speech_gain(&self, gain: f32) -> Result<()> {
+		self.ensure_running()?;
+		self.session.set_speech_gain(gain)
+	}
+	pub fn set_cue_gain(&self, gain: f32) -> Result<()> {
+		self.ensure_running()?;
+		self.session.set_cue_gain(gain)
+	}
+	pub async fn play_signal_gain(
+		&self,
+		signal: SignalKey,
+		gain: f32,
+		cancellation: CancellationToken,
+	) -> Result<bool> {
+		self.ensure_running()?;
+		anyhow::ensure!(
+			gain.is_finite() && (0.0..=2.0).contains(&gain),
+			"Invalid signal gain"
+		);
+		let bytes = signals::get_signal_audio(signal, Some(1.0), None, None)?;
+		let class = if signal == SignalKey::ThinkingLoop {
+			PlaybackClass::Thinking
+		} else {
+			PlaybackClass::Cue
+		};
+		tokio::select! {biased; _=cancellation.cancelled()=>Ok(false),result=self.session.play_audio(bytes,PlaybackInputType::Encoded,Some(PlaybackMode::Urgent),class,Some(10_000),Some(gain),None)=>result}
+	}
 	pub async fn play_signal(
 		&self,
 		signal: SignalKey,
@@ -272,4 +350,9 @@ impl AudioRuntime {
 		);
 		Ok(())
 	}
+}
+
+/// Shared cue bytes for the OBS renderer and native Discord playback.
+pub fn signal_wav(signal: SignalKey) -> Result<Vec<u8>> {
+	signals::get_signal_audio(signal, Some(1.0), None, None)
 }

@@ -523,6 +523,7 @@ mod routing_tests {
 			message_id: "request".into(),
 			text: "private request".into(),
 			is_owner: true,
+			access: Default::default(),
 		}
 	}
 	fn private() -> Delivery {

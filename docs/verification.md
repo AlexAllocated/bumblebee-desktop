@@ -6,6 +6,26 @@ The desktop application is an unsigned development preview. Windows and Linux in
 
 Azure retirement evidence and the private source snapshot are stored outside this public repository. Production data is intentionally not being migrated.
 
+## Dashboard and settings restoration — 2026-10-08
+
+Local source checks passed: 109 core tests, 44 audio tests (four explicit native tests ignored), six desktop tests, and 29 interface/editor tests. Svelte checking reported zero errors and warnings. Nine packaging safeguard tests passed. New coverage includes sparse settings saves across overlapping refreshes, strict settings validation, atomic scoped resets, schema-4 upgrade preservation, per-platform audience policies, audio routing/mixing, owner-only caption cancellation, and private dashboard memory access after owner identity changes.
+
+A private SQLite backup of the existing installation was migrated through the real storage API on a separate copy. Every pre-existing installation setting, the OBS capability token, other stored settings, and every pre-existing column and row outside the intentionally migrated layout/settings were preserved. The live database was not changed by this migration check.
+
+The dark dashboard restores editing for Bumblebee, ordinary chat puppets and the separate streamer caption bubble. Its Settings drawer includes named Discord resources, audio/AI/platform policies, searchable viewer overrides, memory/reminder management and confirmed resets. Discord participant puppets and promotional controls are removed. Automatic Discord channel following, follow-up listening and platform event announcements are not implemented or exposed as working settings in this preview.
+
+## Shared rendering packages — 2026-10-08 source revision
+
+The current dashboard rewrite restores `@hivetech/bumblebee` and `@hivetech/speech-bubbles` as reusable workspace packages. The retained actor, animation, nameplate, SVG bubble, pagination and frame-rendering implementations now accept application-prepared audio. Hosted bot authentication, provider clients, demo credentials, Discord voice puppets and promotional celebrations are absent from these packages.
+
+`bun run check:packages` and `bun run build:packages` passed. The Bumblebee package passed 148 tests; speech-bubbles passed 42. Ten new lifecycle tests cover bounded speech queuing, active/queued interruption, late preparation/model/decode completion, completion-triggered enqueue, hidden subjects, SSML-safe word mapping, and caption timing from the AudioContext clock rather than elapsed wall time. These tests use controlled browser/audio substitutes and do not play audio or call providers.
+
+Both actual package tarballs were installed into an independent temporary consumer, without workspace links. The consumer explicitly pinned both unpublished tarballs, including the transitive speech-bubbles dependency, so the existing npm `0.0.4` release could not substitute for the restored source. Every public source/distribution export and MIT license was present. TypeScript checked all public entry points with `skipLibCheck: false` and no Node ambient types in both default and development conditions; browser bundling also passed in both conditions. This found and fixed a Node-specific timer declaration and missing source CSS declarations. No npm release was published.
+
+The license collector was regenerated from the current resolved dependency tree and produced identical output on a second run. Its generated resource includes the upstream MIT license text and copyright for `immer 11.1.21` and `uuid 14.0.2`; each workspace package includes the project MIT license. The existing packaging workflow regenerates dependency notices, then Linux OS-runtime notices, before bundling. The local resource is not a substitute for the platform-specific notice collection and final installer inspection.
+
+The installer, native-webview and OBS results below describe the earlier preview at `26b3731`, whose renderer preceded this package restoration. They do **not** establish that the current dashboard/package revision has passed Windows/Linux CI, installed native smoke, actual OBS playback, or provider-to-overlay synchronization. Those gates must be rerun for the new release candidate; live integrations, tray/autostart and version-to-version upgrades remain separate checks.
+
 ## Core behavior
 
 The final source checks passed on both Windows and Linux: 87 core tests, 44 audio tests and three desktop transport tests. Native-resource tests require explicit opt-in; there are four on Linux and three on Windows. Coverage includes persistent chatter assignments, catalog resolution, provider authorization ordering, message deduplication, image download/approval boundaries, complete speech-cache entries and expiration, SQLite upgrades, scoped memories/reminders, and the native agent's confirmation/cancellation/uncertain-action ledger. Queue regressions verify that global cancellation invalidates already queued turns, actor cancellation remains isolated, and stopped sessions cannot enqueue work into a replacement session. See [agent behavior](agent-architecture.md) for the tested contracts and provider boundaries. These tests do not establish a live streaming session.

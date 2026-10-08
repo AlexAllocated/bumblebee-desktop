@@ -143,10 +143,13 @@ pub async fn save_overlay_settings(
 	state: State<'_, Arc<Runtime>>,
 	settings: OverlaySettings,
 ) -> CommandResult<OverlaySettings> {
-	settings.validate().map_err(err)?;
-	state
+	let settings = state
 		.store
-		.set("overlay_settings", &settings)
+		.patch_overlay(&serde_json::to_value(settings).map_err(err)?)
+		.map_err(err)?;
+	state
+		.engine
+		.overlay_settings_changed(&settings)
 		.map_err(err)?;
 	let _ = state.transport.events.send(OverlayEvent::OverlaySettings {
 		settings: settings.clone(),
@@ -155,36 +158,87 @@ pub async fn save_overlay_settings(
 }
 
 #[tauri::command]
-pub async fn save_settings(
+pub async fn patch_overlay_settings(
 	state: State<'_, Arc<Runtime>>,
-	settings: Settings,
+	patch: serde_json::Value,
+) -> CommandResult<OverlaySettings> {
+	let store = state.store.clone();
+	let settings = tokio::task::spawn_blocking(move || store.patch_overlay(&patch).map_err(err))
+		.await
+		.map_err(err)??;
+	state
+		.engine
+		.overlay_settings_changed(&settings)
+		.map_err(err)?;
+	state.engine.emit(OverlayEvent::OverlaySettings {
+		settings: settings.clone(),
+	});
+	Ok(settings)
+}
+
+#[tauri::command]
+pub async fn patch_settings(
+	state: State<'_, Arc<Runtime>>,
+	patch: serde_json::Value,
+) -> CommandResult<Settings> {
+	apply_settings_patch(state.inner(), patch).await
+}
+
+async fn apply_settings_patch(
+	state: &Arc<Runtime>,
+	patch: serde_json::Value,
 ) -> CommandResult<Settings> {
 	let _configuration = state.configuration.lock().await;
-	settings.validate().map_err(err)?;
-	let changed = serde_json::to_value(state.store.settings().map_err(err)?).map_err(err)?
-		!= serde_json::to_value(&settings).map_err(err)?;
-	let restart = changed && state.engine.is_active();
-	if changed {
+	let previous = state.store.settings().map_err(err)?;
+	previous.patched(&patch).map_err(err)?;
+	let previous_json = serde_json::to_value(&previous).map_err(err)?;
+	let connection_change = [
+		"twitchClientId",
+		"twitchChannel",
+		"googleClientId",
+		"youtubeLiveChatId",
+		"discordGuildId",
+		"ownerDiscordId",
+	]
+	.iter()
+	.any(|key| {
+		patch
+			.get(key)
+			.is_some_and(|value| value != &previous_json[key])
+	});
+	let restart = connection_change && state.engine.is_active();
+	if connection_change {
 		state.providers.cancel_authorizations();
 	}
-	// Stop the old permissions and connections before the new settings take effect.
 	if restart {
 		state.engine.cancel().await;
 		state.engine.stop().await.map_err(err)?;
 	}
 	let store = state.store.clone();
-	let settings = tokio::task::spawn_blocking(move || {
-		store.set("installation", &settings).map_err(err)?;
-		Ok::<Settings, String>(settings)
-	})
-	.await
-	.map_err(err)??;
+	let settings = tokio::task::spawn_blocking(move || store.patch_settings(&patch).map_err(err))
+		.await
+		.map_err(err)??;
 	if restart {
 		state.engine.start().await.map_err(|error| {
-			format!("Settings were saved, but the session could not restart: {error}")
+			format!("Settings saved, but the session could not reconnect: {error}")
 		})?;
+	} else {
+		state
+			.engine
+			.settings_changed(&previous)
+			.await
+			.map_err(err)?;
 	}
 	Ok(settings)
+}
+
+#[tauri::command]
+pub async fn save_settings(
+	state: State<'_, Arc<Runtime>>,
+	settings: Settings,
+) -> CommandResult<Settings> {
+	settings.validate().map_err(err)?;
+	apply_settings_patch(state.inner(), serde_json::to_value(settings).map_err(err)?).await
 }
 #[tauri::command]
 pub async fn set_secret(
@@ -346,9 +400,16 @@ pub async fn update_chatter(
 	puppet_id: Option<String>,
 	voice_id: Option<String>,
 	blocked: Option<bool>,
+	overrides: Option<ChatterOverrides>,
 ) -> CommandResult<Chatter> {
+	let permissions_changed = overrides.is_some();
 	let store = state.store.clone();
 	let chatter = tokio::task::spawn_blocking(move || {
+		if let Some(overrides) = overrides {
+			store
+				.set_chatter_overrides(&platform, &user_id, &overrides)
+				.map_err(err)?;
+		}
 		if let Some(puppet) = puppet_id {
 			store
 				.set_chatter_puppet(&platform, &user_id, &puppet)
@@ -368,6 +429,13 @@ pub async fn update_chatter(
 	})
 	.await
 	.map_err(err)??;
+	if permissions_changed {
+		state
+			.engine
+			.chatter_settings_changed(&chatter.platform, &chatter.user_id)
+			.await
+			.map_err(err)?;
+	}
 	let _ = state.transport.events.send(OverlayEvent::ChatterChanged {
 		chatter: chatter.clone(),
 	});

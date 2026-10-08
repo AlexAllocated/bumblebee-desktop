@@ -36,6 +36,19 @@ impl Speech {
 			providers,
 		})
 	}
+	pub async fn publish_signal(&self, audio: Vec<u8>) -> Result<(String, u64)> {
+		let duration = wav_duration_ms(&audio)?;
+		let filename = format!("{:x}.wav", Sha256::digest(&audio));
+		let current = filename.clone();
+		let media = self.media.clone();
+		let publication = self.media_publication.clone().lock_owned().await;
+		tokio::task::spawn_blocking(move || {
+			let _publication = publication;
+			publish_media(&media, &current, &audio)
+		})
+		.await??;
+		Ok((filename, duration))
+	}
 	pub async fn prepare(
 		&self,
 		text: &str,

@@ -144,6 +144,15 @@ pub async fn run(state: Arc<Runtime>) -> Result<()> {
 			initial["type"] == "overlay_settings",
 			"Overlay did not receive its persisted layout"
 		);
+		let mix = tokio::time::timeout(Duration::from_secs(5), socket.next())
+			.await?
+			.context("Overlay socket closed without audio settings")??;
+		let mix: serde_json::Value = serde_json::from_str(mix.to_text()?)?;
+		ensure!(
+			mix["type"] == "audio_settings"
+				&& mix["settings"]["output"] == state.store.settings()?.audio_output,
+			"OBS reconnect did not receive the saved audio routing"
+		);
 		state
 			.transport
 			.events

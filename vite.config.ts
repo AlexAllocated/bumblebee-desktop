@@ -1,17 +1,12 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
   plugins: [svelte()],
   base: "./",
-  resolve: {
-    alias: {
-      "@speech-bubbles": fileURLToPath(
-        new URL("./src/renderer/speech-bubbles/index.ts", import.meta.url),
-      ),
-    },
-  },
+  resolve: { conditions: ["development", "module", "browser", "default"] },
+  // Keep Babylon loader/shader registrations in one module graph in development.
+  optimizeDeps: { exclude: ["@babylonjs/core", "@babylonjs/loaders"] },
   clearScreen: false,
   server: {
     host: "127.0.0.1",

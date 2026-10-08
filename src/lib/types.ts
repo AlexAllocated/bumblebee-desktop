@@ -1,3 +1,20 @@
+import type { OverlaySettings } from "./overlay";
+export type { OverlaySettings } from "./overlay";
+export interface AudiencePolicy {
+  everyone: boolean;
+  roleIds: string[];
+  followers: boolean;
+  subscribers: boolean;
+  vips: boolean;
+  moderators: boolean;
+  members: boolean;
+}
+export interface PlatformPolicy {
+  monitor: boolean;
+  relay: boolean;
+  mentions: AudiencePolicy;
+  readout: AudiencePolicy;
+}
 export interface Settings {
   overlayPort: number;
   azureRegion: string;
@@ -22,6 +39,45 @@ export interface Settings {
   wakeWord: string;
   replayEnabled: boolean;
   replaySeconds: number;
+  audioOutput: "overlay" | "discord";
+  masterVolume: number;
+  bumblebeeTtsVolume: number;
+  puppetTtsVolume: number;
+  wakeChirpVolume: number;
+  thinkingSoundVolume: number;
+  flyingSoundVolume: number;
+  chatTtsWaitingToneVolume: number;
+  chatTtsWaitingToneEnabled: boolean;
+  chatTtsSpeakerIntroCooldownSeconds: number;
+  chatTtsInterruptSilenceMs: number;
+  chatTtsQueueExpirationMs: number;
+  chatTtsBlockedWords: string[];
+  chatAiDictationEnabled: boolean;
+  voiceMentionsEnabled: boolean;
+  wakeKeywordSensitivity: "strict" | "balanced" | "loose";
+  stopKeywordSensitivity: "strict" | "balanced" | "loose";
+  cancelKeywordSensitivity: "strict" | "balanced" | "loose";
+  openaiVoiceModel: string;
+  openaiReasoningEffort: string;
+  openaiVoiceReasoningEffort: string;
+  imageModel: string;
+  aiWebSearchEnabled: boolean;
+  aiCodeInterpreterEnabled: boolean;
+  aiImageGenerationEnabled: boolean;
+  aiMemoriesEnabled: boolean;
+  aiRemindersEnabled: boolean;
+  chatPlatforms: Record<"discord" | "twitch" | "youtube", PlatformPolicy>;
+  voiceCaptionsEnabled: boolean;
+  streamerTranscriptionModel: string;
+}
+export type OverrideChoice = "inherit" | "allow" | "block";
+export interface ChatterOverrides {
+  chatPuppet: OverrideChoice;
+  relay: OverrideChoice;
+  ttsWait: OverrideChoice;
+  aiAccess: OverrideChoice;
+  textModel: string | null;
+  voiceModel: string | null;
 }
 export interface Chatter {
   platform: string;
@@ -31,6 +87,7 @@ export interface Chatter {
   voiceId: string;
   imageHash: string | null;
   customizationBlocked: boolean;
+  overrides: ChatterOverrides;
 }
 export interface Puppet {
   id: string;
@@ -77,16 +134,28 @@ export interface RecoveryTurn {
   state: string;
   updatedAt: number;
 }
-export interface OverlaySettings {
-  beeX: number;
-  beeY: number;
-  beeScale: number;
-  beeVisible: boolean;
-  puppetScale: number;
-  puppetHorizontal: number;
-  puppetOcclusion: number;
-  puppetsVisible: boolean;
-  bubblesVisible: boolean;
+export interface Memory {
+  id: string;
+  content: string;
+  actor: string;
+  createdAt: number;
+}
+export interface Reminder {
+  id: string;
+  content: string;
+  actor: string;
+  dueAt: number;
+  state: string;
+}
+export interface Library {
+  memories: Memory[];
+  reminders: Reminder[];
+}
+export interface DiscordOption {
+  id: string;
+  name: string;
+  kind: number;
+  parentId: string | null;
 }
 export interface Artifact {
   id: string;
@@ -116,7 +185,28 @@ export interface WordTiming {
   startMs: number;
   durationMs: number;
 }
+export interface AudioMix {
+  output: "overlay" | "discord";
+  masterVolume: number;
+  bumblebeeTtsVolume: number;
+  puppetTtsVolume: number;
+  flyingSoundVolume: number;
+  wakeChirpVolume: number;
+  thinkingSoundVolume: number;
+  chatTtsWaitingToneVolume: number;
+}
 export type OverlayEvent =
+  | {
+      type: "signal";
+      id: string;
+      audio_path: string;
+      gain: number;
+      kind: "wake" | "thinking" | "waiting";
+      looping: boolean;
+      audible: boolean;
+    }
+  | { type: "stop_signal"; id: string }
+  | { type: "audio_settings"; settings: AudioMix }
   | { type: "overlay_settings"; settings: OverlaySettings }
   | { type: "chatter_changed"; chatter: Chatter }
   | { type: "chat"; chatter: Chatter; text: string }
@@ -127,8 +217,17 @@ export type OverlayEvent =
       text: string;
       audio_path: string;
       words: WordTiming[];
+      audible: boolean;
+      gain: number;
     }
   | { type: "stop_speech" }
+  | {
+      type: "voice_transcript";
+      userId: string;
+      isOwner: boolean;
+      text: string;
+      final: boolean;
+    }
   | { type: "image"; id: string; image_path: string; title: string }
   | { type: "presentation"; title: string; text: string }
   | { type: "hide_image" }

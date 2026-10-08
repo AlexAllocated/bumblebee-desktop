@@ -39,6 +39,7 @@ fn message(id: &str, user: &str, owner: bool, text: &str) -> ChatMessage {
 		channel_id: "stream".into(),
 		text: text.into(),
 		is_owner: owner,
+		access: Default::default(),
 	}
 }
 
@@ -405,5 +406,203 @@ async fn desktop_pending_answer_is_private_and_uses_original_actor_cancellation(
 	}
 	assert!(engine.cancel_actor("twitch:123").await);
 	assert!(job.scope.cancel.is_cancelled());
+	engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn volume_changes_keep_sessions_and_pending_work_alive_but_revocation_cancels() {
+	let (_directory, engine) = fixture();
+	engine.start().await.unwrap();
+	let before = engine.store.settings().unwrap();
+	let (agent, speech) = {
+		let mut session = engine.session.lock().await;
+		let s = session.as_mut().unwrap();
+		(
+			s.agent_scopes.lease("preview:owner"),
+			s.speech_cancel.clone(),
+		)
+	};
+	engine
+		.store
+		.patch_settings(&json!({"masterVolume":0.2,"bumblebeeTtsVolume":0.4}))
+		.unwrap();
+	engine.settings_changed(&before).await.unwrap();
+	assert!(!agent.cancel.is_cancelled());
+	assert!(!speech.is_cancelled());
+	assert!(engine.is_active());
+	let before = engine.store.settings().unwrap();
+	engine
+		.store
+		.patch_settings(&json!({"chatPlatforms":{"twitch":{"monitor":false}}}))
+		.unwrap();
+	engine.settings_changed(&before).await.unwrap();
+	assert!(agent.cancel.is_cancelled());
+	assert!(speech.is_cancelled());
+	assert!(engine.is_active());
+	engine.stop().await.unwrap();
+}
+#[tokio::test]
+async fn expired_and_blocked_readouts_never_reach_a_provider() {
+	let (_directory, engine) = fixture();
+	let source = ChatMessage {
+		platform: "twitch".into(),
+		..message("m", "viewer", false, "hello")
+	};
+	engine
+		.store
+		.ensure_chatter("twitch", "viewer", "Viewer")
+		.unwrap();
+	engine
+		.run_speech_job(SpeechJob {
+			source: source.clone(),
+			queued_at: std::time::Instant::now() - Duration::from_secs(61),
+			cancel: CancellationToken::new(),
+		})
+		.await
+		.unwrap();
+	engine
+		.store
+		.patch_settings(&json!({"chatTtsBlockedWords":["hello"]}))
+		.unwrap();
+	engine
+		.run_speech_job(SpeechJob {
+			source,
+			queued_at: std::time::Instant::now(),
+			cancel: CancellationToken::new(),
+		})
+		.await
+		.unwrap();
+}
+
+#[tokio::test]
+async fn local_setting_effect_does_not_cancel_its_own_success_before_receipt() {
+	let (_tmp, engine) = fixture();
+	engine.start().await.unwrap();
+	let previous = engine
+		.store
+		.patch_settings(&serde_json::json!({"aiEnabled":true}))
+		.unwrap();
+	let scope = engine
+		.session
+		.lock()
+		.await
+		.as_mut()
+		.unwrap()
+		.agent_scopes
+		.lease("preview:owner");
+	engine
+		.store
+		.patch_settings(&serde_json::json!({"aiEnabled":false}))
+		.unwrap();
+	engine.settings_changed_from_agent(&previous).await.unwrap();
+	assert!(!scope.cancel.is_cancelled());
+	assert!(!engine.store.settings().unwrap().ai_enabled);
+	engine.stop().await.unwrap();
+}
+#[tokio::test]
+async fn quiet_output_cues_share_native_wav_and_cancel_without_spoken_events() {
+	let (_tmp, engine) = fixture();
+	let mut events = engine.events.subscribe();
+	let cue = tokio::spawn({
+		let engine = engine.clone();
+		async move {
+			engine
+				.play_cue(
+					bumblebee_audio::SignalKey::ThinkingLoop,
+					CancellationToken::new(),
+				)
+				.await
+		}
+	});
+	let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+		.await
+		.unwrap()
+		.unwrap();
+	let OverlayEvent::Signal {
+		id,
+		audio_path,
+		kind,
+		audible,
+		..
+	} = event
+	else {
+		panic!("Expected renderer cue")
+	};
+	assert!(audible);
+	assert_eq!(kind, "thinking");
+	let bytes = std::fs::read(engine.paths.data_dir.join("media").join(audio_path)).unwrap();
+	assert_eq!(&bytes[..4], b"RIFF");
+	engine.cancel_signals();
+	cue.await.unwrap().unwrap();
+	assert!(
+		matches!(events.recv().await.unwrap(),OverlayEvent::StopSignal{id:stopped} if stopped==id)
+	);
+	let token = CancellationToken::new();
+	token.cancel();
+	engine
+		.play_cue(bumblebee_audio::SignalKey::WakeChirp, token)
+		.await
+		.unwrap();
+	assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn caption_off_on_invalidates_old_work_without_canceling_conversation_or_speech() {
+	let (_tmp, engine) = fixture();
+	engine.start().await.unwrap();
+	let caption = engine.caption_cancel.lock().unwrap().child_token();
+	let mut enabled = crate::model::OverlaySettings::default();
+	enabled.streamer_voice_bubble.enabled = true;
+	let mut disabled = enabled.clone();
+	disabled.streamer_voice_bubble.enabled = false;
+	let (agent, speech) = {
+		let mut session = engine.session.lock().await;
+		let s = session.as_mut().unwrap();
+		(s.agent_scopes.lease("discord:123"), s.speech_cancel.clone())
+	};
+	// Store already sees reenabled settings when the delayed off notification arrives.
+	engine.store.set("overlay_settings", &enabled).unwrap();
+	engine.overlay_settings_changed(&disabled).unwrap();
+	engine.overlay_settings_changed(&enabled).unwrap();
+	assert!(caption.is_cancelled());
+	assert!(!agent.cancel.is_cancelled());
+	assert!(!speech.is_cancelled());
+	let fresh = engine.caption_cancel.lock().unwrap().child_token();
+	enabled.streamer_voice_bubble.position.horizontal_percent = 45.;
+	engine.overlay_settings_changed(&enabled).unwrap();
+	assert!(!fresh.is_cancelled());
+	engine.stop().await.unwrap();
+	assert!(fresh.is_cancelled());
+}
+#[tokio::test]
+async fn profile_ai_block_prevents_wake_audio_capture_before_transcription() {
+	let (_tmp, engine) = fixture();
+	engine.start().await.unwrap();
+	engine
+		.store
+		.patch_settings(&json!({"aiEnabled":true}))
+		.unwrap();
+	engine
+		.store
+		.ensure_chatter("discord", "123", "Viewer")
+		.unwrap();
+	engine
+		.store
+		.set_chatter_overrides(
+			"discord",
+			"123",
+			&crate::model::ChatterOverrides {
+				ai_access: crate::model::Override::Block,
+				..Default::default()
+			},
+		)
+		.unwrap();
+	assert!(
+		engine
+			.begin_voice_capture("123", "Viewer".into(), true)
+			.await
+			.unwrap()
+			.is_none()
+	);
 	engine.stop().await.unwrap();
 }

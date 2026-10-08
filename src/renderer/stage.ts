@@ -1,390 +1,556 @@
 import { Vector2 } from "@babylonjs/core/Maths/math.vector";
-import { createScene } from "./legacy/bumblebee/createScene";
-import { loadModel } from "./legacy/bumblebee/loadModel";
-import { createPuppet, type PuppetController } from "./legacy/puppet";
-import { screenToWorld } from "./legacy/utils/screenToWorld";
-import type { Chatter, OverlayEvent, OverlaySettings } from "../lib/types";
 import {
-  bubbleCenter,
-  bubbleWidthLimit,
-  bubbleHeightLimit,
-  wordFragments,
-  wordScrollTop,
-} from "./bubbleLayout";
+  createOverlay,
+  type Overlay,
+  type Bumblebee,
+  type Puppet,
+  type SpeechTarget,
+} from "@hivetech/bumblebee";
+import {
+  createBubbleRenderer,
+  type BubbleRenderer,
+} from "@hivetech/speech-bubbles";
+import type { AudioMix, Chatter, OverlayEvent } from "../lib/types";
+import {
+  cloneOverlaySettings,
+  defaultOverlaySettings,
+  type OverlaySettings,
+} from "../lib/overlay";
+import {
+  subjectRect,
+  streamerPose,
+  defaultDimensions,
+  type Dimensions,
+} from "./overlayLayout";
+import { bumblebeePlacement } from "./legacyLayout";
+import { chatBubbleStyleSeeds } from "./bubbleStyles";
+import { speechGain } from "./audioMix";
+import { createSignals } from "./signals";
 
 type Speech = Extract<OverlayEvent, { type: "speech" }>;
 type Entry = {
   profile: Chatter;
-  puppet: PuppetController;
-  label: HTMLDivElement;
+  actor: Puppet;
   seen: number;
+  preview: boolean;
+  visible: boolean;
 };
-
-/** The same frame-driven models and playback lifecycle run in OBS and in the desktop preview. */
+/** Native transport adapter. The reusable package owns actors, speech, its queue, and its clock. */
 export function createStage(
   container: HTMLElement,
   assetBase: string,
   muted = false,
+  editing = false,
 ) {
-  const scene = createScene({
-    container,
-    id: `desktop-${crypto.randomUUID()}`,
-    zIndex: 1,
+  let runtime: Overlay | null = null,
+    bee: Bumblebee | null = null,
+    disposed = false;
+  let settings = cloneOverlaySettings(defaultOverlaySettings);
+  let dimensions: Dimensions = structuredClone(defaultDimensions);
+  let audioMix: AudioMix | null = null,
+    signalContext: AudioContext | null = null;
+  let activeSpeech: Speech | null = null,
+    lastChatKey = "";
+  let speechGeneration = 0;
+  const entries = new Map<string, Entry>(),
+    pending = new Map<string, Promise<Entry | null>>();
+  const speechMetadata = new Map<string, Speech>(),
+    received = new Set<string>();
+  const viewport = () => ({
+    width: container.clientWidth,
+    height: container.clientHeight,
   });
-  const entries = new Map<string, Entry>();
-  const pending = new Map<string, Promise<Entry | null>>();
-  const generations = new Map<string, number>();
-  let nextGeneration = 0;
-  let settings: OverlaySettings = {
-    beeX: 0.15,
-    beeY: 0.82,
-    beeScale: 0.3,
-    beeVisible: true,
-    puppetScale: 0.3,
-    puppetHorizontal: 0.7,
-    puppetOcclusion: 0.15,
-    puppetsVisible: true,
-    bubblesVisible: true,
-  };
-  let disposed = false;
-  let bee: Awaited<ReturnType<typeof loadModel>> | null = null;
-  let activeAudio: HTMLAudioElement | null = null;
-  let playing = false;
-  let playGeneration = 0;
-  let cleanupSpeech: (() => void) | null = null;
-  let bubbleAnchor: Entry | null | undefined;
-  let highlightedSpan: HTMLSpanElement | null = null;
-  const queue: Speech[] = [];
-  const received = new Set<string>();
-  const bubble = document.createElement("div");
-  bubble.className = "speech-bubble";
-  bubble.hidden = true;
-  container.appendChild(bubble);
+  const url = (path: string) => new URL(path, assetBase).toString();
+  const identity = (profile: Chatter) =>
+    `${profile.platform}:${profile.userId}`;
+  const image = (profile: Chatter) =>
+    url(
+      profile.imageHash
+        ? `images/${profile.imageHash}.png`
+        : `puppets/images/${profile.puppetId}.png`,
+    );
+  const style = (id: string) =>
+    (chatBubbleStyleSeeds.find((s) => s.id === id) ?? chatBubbleStyleSeeds[0])
+      .style;
+  const signals = createSignals(
+    assetBase,
+    () => (signalContext ??= new AudioContext()),
+    () => audioMix,
+    () => muted,
+  );
+  let streamerCaption: BubbleRenderer | null = null,
+    streamerPreview: BubbleRenderer | null = null;
+  let streamerTimer: ReturnType<typeof setTimeout> | undefined;
   const presentation = document.createElement("div");
   presentation.className = "overlay-presentation";
   presentation.hidden = true;
   container.appendChild(presentation);
-  const url = (path: string) => new URL(path, assetBase).toString();
-  const key = (p: Chatter) => `${p.platform}:${p.userId}`;
-  const image = (p: Chatter) =>
-    url(
-      p.imageHash
-        ? `images/${p.imageHash}.png`
-        : `puppets/images/${p.puppetId}.png`,
-    );
-  const placeBee = () => {
+  function report(error: unknown) {
+    if (!disposed) console.error("Overlay operation failed", error);
+  }
+  function placeBee() {
     if (!bee || disposed) return;
-    const canvas = scene.getEngine().getRenderingCanvas()!;
-    const r = canvas.getBoundingClientRect();
-    bee.node.position.copyFrom(
-      screenToWorld(
-        bee.node,
-        new Vector2(r.width * settings.beeX, r.height * settings.beeY),
-        scene.activeCamera!,
-        canvas,
-        settings.beeScale,
-      ),
+    const v = viewport(),
+      s = settings.bumblebee;
+    const placement = bumblebeePlacement(s, v, dimensions.bee);
+    const bounds = subjectRect(settings, "bumblebee", v, dimensions);
+    void bee
+      .placeAt({
+        destination: new Vector2(placement.x, placement.y),
+        scalePercentage: s.scalePercentage,
+        scaleReference: new Vector2(v.width, v.height),
+        stance: bounds.bottom >= v.height * 0.97 ? "standing" : "flying",
+        visible: s.visible,
+      })
+      .catch(report);
+  }
+  function chatPose() {
+    const v = viewport(),
+      bounds = subjectRect(settings, "puppet", v, dimensions);
+    return {
+      position: {
+        horizontalPercent: (bounds.centerX / Math.max(1, v.width)) * 100,
+      },
+      scale: settings.puppet.scalePercentage,
+      occlusion: settings.puppet.occlusionPercentage,
+    };
+  }
+  function applyEntry(entry: Entry) {
+    const s = settings.puppet;
+    const current = activeSpeech?.chatter
+      ? identity(activeSpeech.chatter)
+      : null;
+    const visible =
+      s.enabled &&
+      (entry.preview
+        ? editing && settings.editPreview.puppet && !current
+        : identity(entry.profile) === current ||
+          (!activeSpeech &&
+            s.showWhenIdle &&
+            identity(entry.profile) === lastChatKey));
+    void entry.actor.setPose(chatPose(), { animate: false }).catch(report);
+    entry.actor.setNameplate(
+      visible && !entry.preview && s.nameplatesEnabled
+        ? {
+            text: entry.profile.displayName,
+            platform: entry.profile.platform as
+              "discord" | "twitch" | "youtube",
+          }
+        : null,
     );
-    bee.node.setEnabled(settings.beeVisible);
-  };
-  const horizontal = (index: number) =>
-    Math.max(
-      0.05,
-      Math.min(0.95, settings.puppetHorizontal - 0.22 + (index % 6) * 0.088),
-    ) * 100;
-  function applySettings(next: OverlaySettings) {
-    const showPuppets = next.puppetsVisible && !settings.puppetsVisible;
-    settings = next;
-    placeBee();
-    let index = 0;
-    for (const entry of entries.values()) {
-      entry.puppet.setPuppetPosition({
-        horizontalPercent: horizontal(index++),
+    if (visible !== entry.visible) {
+      entry.visible = visible;
+      void (visible ? entry.actor.show() : entry.actor.hide()).catch(report);
+    }
+  }
+  function applyBubbleOptions() {
+    const s = activeSpeech?.chatter ? settings.puppet : settings.bumblebee;
+    runtime?.setBubbleOptions({
+      enabled: s.chatBubblesEnabled,
+      container,
+      viewport,
+      maxWidthPercent: s.chatBubbleMaxWidthPercent,
+      maxHeightPercent: s.chatBubbleMaxHeightPercent,
+      scale: s.chatBubbleTextSizePercentage,
+      zIndex: 4,
+    });
+    runtime?.setNameplateOptions({
+      enabled: settings.puppet.nameplatesEnabled,
+      container,
+      zIndex: 5,
+    });
+  }
+  function updateVolume() {
+    if (runtime)
+      runtime.setVolume(
+        activeSpeech
+          ? speechGain(activeSpeech, audioMix, muted)
+          : muted || audioMix?.output === "discord"
+            ? 0
+            : (audioMix?.masterVolume ?? 1),
+      );
+    signals.update();
+  }
+  function streamerOptions() {
+    const s = settings.streamerVoiceBubble,
+      body = subjectRect(settings, "streamerVoiceBubble", viewport());
+    return {
+      target: container,
+      pose: streamerPose(settings, viewport()),
+      style: style(s.chatBubbleStyleId),
+      scale: s.textSizePercentage / 0.5,
+      fixedBodyRect: body,
+      fixedBodySize: { width: body.width, height: body.height },
+      maxWidthPercent: s.chatBubbleMaxWidthPercent,
+      maxHeightPercent: s.chatBubbleMaxHeightPercent,
+      viewport,
+      zIndex: 4,
+    };
+  }
+  function refreshCaption() {
+    if (!settings.streamerVoiceBubble.enabled) {
+      clearTimeout(streamerTimer);
+      streamerCaption?.dispose();
+      streamerCaption = null;
+    } else streamerCaption?.update(streamerOptions());
+    streamerPreview?.dispose();
+    streamerPreview = null;
+    if (
+      editing &&
+      settings.streamerVoiceBubble.enabled &&
+      settings.editPreview.streamerVoiceBubble &&
+      !streamerCaption
+    ) {
+      streamerPreview = createBubbleRenderer({
+        ...streamerOptions(),
+        text: "Streamer voice bubble",
       });
-      entry.puppet.setScalePercentage(settings.puppetScale);
-      entry.puppet.setOcclusionRatio(settings.puppetOcclusion);
-      entry.puppet.node.setEnabled(settings.puppetsVisible);
-      if (showPuppets) void entry.puppet.show();
-      entry.label.hidden = !settings.puppetsVisible;
+      streamerPreview.show();
     }
-    bubble.hidden = !settings.bubblesVisible || bubbleAnchor === undefined;
-    placeBubble();
   }
-  const ready = loadModel({
-    scene,
-    modelUrl: url("models/bumblebee.cb67e11b.glb"),
-  }).then(async (model) => {
-    if (disposed) {
-      model.node.dispose();
-      throw new Error("Renderer was disposed before its model loaded");
+  async function ensure(
+    profile: Chatter,
+    preview = false,
+  ): Promise<Entry | null> {
+    if (!runtime || disposed) return null;
+    const key = identity(profile),
+      existing = entries.get(key);
+    if (existing && image(existing.profile) === image(profile)) {
+      existing.profile = profile;
+      existing.seen = performance.now();
+      return existing;
     }
-    bee = model;
-    model.animationGroups.find((a) => a.name === "idleFlying")?.start(true);
-    placeBee();
-    await scene.whenReadyAsync();
-    await new Promise<void>((resolve) =>
-      scene.onAfterRenderObservable.addOnce(() => resolve()),
-    );
-  });
-  // Keep failures visible even if the caller does not wait for readiness (for example OBS).
-  void ready.catch((error) => {
-    if (!disposed) console.error("Bumblebee model could not load", error);
-  });
-  function placeBubble() {
-    if (bubble.hidden || disposed) return;
-    const width = container.clientWidth;
-    bubble.style.maxWidth = `${bubbleWidthLimit(width)}px`;
-    bubble.style.maxHeight = `${bubbleHeightLimit(container.clientHeight)}px`;
-    const anchor =
-      bubbleAnchor && !bubbleAnchor.puppet.node.isDisposed()
-        ? bubbleAnchor.puppet.getNameplateScreenAnchor()
-        : null;
-    const preferred = anchor
-      ? anchor.x - container.getBoundingClientRect().left
-      : width * settings.beeX;
-    bubble.style.left = `${bubbleCenter(preferred, bubble.offsetWidth, width)}px`;
-    followHighlightedWord();
-  }
-  function followHighlightedWord() {
-    if (!highlightedSpan || bubble.hidden) return;
-    // Read layout only for a new word or a resize, rather than on every audio-clock frame.
-    const next = wordScrollTop(
-      bubble.scrollTop,
-      bubble.clientHeight,
-      bubble.scrollHeight,
-      highlightedSpan.offsetTop,
-      highlightedSpan.offsetHeight,
-    );
-    if (next !== bubble.scrollTop) bubble.scrollTop = next;
-  }
-  const resize = new ResizeObserver(() => {
-    placeBee();
-    placeBubble();
-  });
-  resize.observe(container);
-  resize.observe(bubble);
-
-  async function ensure(profile: Chatter): Promise<Entry | null> {
-    const id = key(profile);
-    const old = entries.get(id);
-    if (old && image(old.profile) === image(profile)) {
-      old.profile = profile;
-      old.label.textContent = profile.displayName;
-      old.seen = performance.now();
-      return old;
+    if (pending.has(key)) {
+      await pending.get(key);
+      return ensure(profile, preview);
     }
-    if (pending.has(id)) {
-      await pending.get(id);
-      const ready = entries.get(id);
-      if (ready && image(ready.profile) === image(profile)) {
-        ready.profile = profile;
-        ready.label.textContent = profile.displayName;
-        ready.seen = performance.now();
-        return ready;
-      }
-    }
-    // A chat burst cannot start unbounded parallel image decoding and mesh creation.
-    if (disposed || pending.size >= 4) return null;
-    const version = ++nextGeneration;
-    generations.set(id, version);
+    while (!disposed && pending.size >= 4) await Promise.race(pending.values());
+    if (disposed) return null;
     const operation = (async () => {
-      const existing = entries.get(id);
       if (existing) {
-        await existing.puppet.dispose();
-        existing.label.remove();
-        entries.delete(id);
+        entries.delete(key);
+        await existing.actor.dispose();
       }
-      if (entries.size >= 10) {
-        const oldest = [...entries].sort((a, b) => a[1].seen - b[1].seen)[0];
-        if (oldest) {
-          entries.delete(oldest[0]);
-          oldest[1].label.remove();
-          void oldest[1].puppet.dispose();
-        }
-      }
-      const horizontalPercent = horizontal(entries.size);
       const options = {
-        scene,
-        puppetId: profile.puppetId,
+        instanceId: key,
         imageUrl: image(profile),
-        puppetPosition: { horizontalPercent },
-        scalePercentage: settings.puppetScale,
-        occlusionPercentage: settings.puppetOcclusion,
+        visible: false,
+        hideAfterSpeech: !settings.puppet.showWhenIdle,
+        scale: settings.puppet.scalePercentage,
+        occlusion: settings.puppet.occlusionPercentage,
       };
-      let puppet: PuppetController;
+      let actor: Puppet;
       try {
-        puppet = await createPuppet(options);
+        actor = await runtime!.puppet(profile.puppetId, options);
       } catch {
-        puppet = await createPuppet({
+        actor = await runtime!.puppet(profile.puppetId, {
           ...options,
           imageUrl: url(`puppets/images/${profile.puppetId}.png`),
         });
       }
-      if (disposed || generations.get(id) !== version) {
-        await puppet.dispose();
+      if (disposed) {
+        await actor.dispose();
         return null;
       }
-      // Loads finish asynchronously; enforce the live limit again at insertion.
-      if (entries.size >= 10) {
-        const oldest = [...entries].sort((a, b) => a[1].seen - b[1].seen)[0];
+      if (entries.size >= 28) {
+        const oldest = [...entries]
+          .filter(
+            ([, e]) =>
+              identity(e.profile) !==
+                (activeSpeech?.chatter
+                  ? identity(activeSpeech.chatter)
+                  : null) && !e.preview,
+          )
+          .sort((a, b) => a[1].seen - b[1].seen)[0];
         if (oldest) {
           entries.delete(oldest[0]);
-          oldest[1].label.remove();
-          void oldest[1].puppet.dispose();
+          await oldest[1].actor.dispose();
         }
       }
-      const label = document.createElement("div");
-      label.className = "puppet-label";
-      label.textContent = profile.displayName;
-      container.appendChild(label);
-      const entry = { profile, puppet, label, seen: performance.now() };
-      entries.set(id, entry);
-      label.hidden = !settings.puppetsVisible;
-      if (settings.puppetsVisible) void puppet.show();
-      else puppet.node.setEnabled(false);
+      const entry = {
+        profile,
+        actor,
+        seen: performance.now(),
+        preview,
+        visible:
+          !preview &&
+          settings.puppet.enabled &&
+          identity(profile) ===
+            (activeSpeech?.chatter ? identity(activeSpeech.chatter) : null),
+      };
+      entries.set(key, entry);
+      if (!preview) {
+        const d = actor.getLocalSize();
+        if (d) dimensions.puppetAspect = d.width / d.height;
+      }
+      applyEntry(entry);
       return entry;
     })().catch((error) => {
-      if (!disposed) console.error("Puppet failed to render", error);
+      report(error);
       return null;
     });
-    pending.set(id, operation);
+    pending.set(key, operation);
     try {
       return await operation;
     } finally {
-      if (pending.get(id) === operation) {
-        pending.delete(id);
-        generations.delete(id);
-      }
+      if (pending.get(key) === operation) pending.delete(key);
     }
   }
-  const beforeRender = scene.onBeforeRenderObservable.add(() => {
-    const rect = container.getBoundingClientRect();
-    for (const entry of entries.values()) {
-      const pose = entry.puppet.getNameplateScreenAnchor();
-      if (pose) {
-        entry.label.style.left = `${pose.x - rect.left}px`;
-        entry.label.style.top = `${pose.y - rect.top}px`;
-        entry.label.style.transform = `translate(-50%,-50%) rotate(${pose.rotationDeg}deg) scale(${pose.scale})`;
-      }
-    }
-  });
-  function stop() {
-    playGeneration++;
-    queue.length = 0;
-    activeAudio?.pause();
-    activeAudio = null;
-    cleanupSpeech?.();
-    cleanupSpeech = null;
-    playing = false;
-    bubbleAnchor = undefined;
-    highlightedSpan = null;
-    bubble.hidden = true;
-    for (const entry of entries.values()) void entry.puppet.shutup();
-    bee?.animationGroups.find((a) => a.name === "talking")?.stop();
+  let previewSync: Promise<void> | null = null;
+  function syncPreview() {
+    if (previewSync || disposed || !runtime) return;
+    previewSync = (async () => {
+      if (editing && settings.editPreview.puppet)
+        await ensure(
+          {
+            platform: "preview",
+            userId: "chat",
+            displayName: "Preview",
+            puppetId: "dandy",
+            voiceId: "dandy",
+            imageHash: null,
+            customizationBlocked: false,
+            overrides: {
+              chatPuppet: "inherit",
+              relay: "inherit",
+              ttsWait: "inherit",
+              aiAccess: "inherit",
+              textModel: null,
+              voiceModel: null,
+            },
+          },
+          true,
+        );
+      const preview = entries.get("preview:chat");
+      if (preview) applyEntry(preview);
+    })().finally(() => {
+      previewSync = null;
+    });
   }
-  async function playNext() {
-    if (playing || disposed) return;
-    const event = queue.shift();
-    if (!event) return;
-    playing = true;
-    const generation = playGeneration;
-    const entry = event.chatter ? await ensure(event.chatter) : null;
-    if (disposed || generation !== playGeneration) return;
-    const mediaPath = event.audio_path.replace(/^media\//, "");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(mediaPath)) {
-      playing = false;
-      void playNext();
+  function applySettings(next: OverlaySettings) {
+    settings = cloneOverlaySettings(next);
+    placeBee();
+    void runtime
+      ?.configureChatPuppets(chatPose(), { animate: false })
+      .catch(report);
+    for (const entry of entries.values()) applyEntry(entry);
+    applyBubbleOptions();
+    refreshCaption();
+    syncPreview();
+  }
+  const ready = (async () => {
+    const created = await createOverlay({
+      assetBaseUrl: assetBase,
+      assets: {
+        bumblebeeModelUrl: url("models/bumblebee.cb67e11b.glb"),
+        puppetImageUrl: (id) => url(`puppets/images/${id}.png`),
+      },
+      surface: { container },
+      zIndex: 1,
+      bubbles: { container, viewport, zIndex: 4 },
+      nameplates: { container, zIndex: 5 },
+      chatPuppets: chatPose(),
+    });
+    if (disposed) {
+      await created.dispose();
+      throw new Error("Renderer disposed before initialization");
+    }
+    runtime = created;
+    updateVolume();
+    runtime.on("actor:disposed", (event) => {
+      for (const [key, entry] of entries) {
+        if (entry.actor.actorId === event.actorId) entries.delete(key);
+      }
+    });
+    runtime.on("speech:start", (event) => {
+      activeSpeech = speechMetadata.get(event.audioId) ?? null;
+      updateVolume();
+      applyBubbleOptions();
+      if (activeSpeech?.chatter) {
+        lastChatKey = identity(activeSpeech.chatter);
+        void ensure(activeSpeech.chatter).then((entry) => {
+          if (entry && !disposed) applyEntry(entry);
+        });
+      }
+      for (const entry of entries.values()) applyEntry(entry);
+    });
+    runtime.on("speech:end", (event) => {
+      speechMetadata.delete(event.audioId);
+      if (activeSpeech?.id === event.audioId) {
+        if (activeSpeech.chatter && !settings.puppet.showWhenIdle) {
+          const entry = entries.get(identity(activeSpeech.chatter));
+          if (entry) entry.visible = false;
+        }
+        activeSpeech = null;
+      }
+      for (const entry of entries.values()) applyEntry(entry);
+      updateVolume();
+    });
+    bee = await runtime.bumblebee({
+      visible: settings.bumblebee.visible,
+      scaleReference: container,
+    });
+    if (disposed) {
+      await runtime.dispose();
       return;
     }
-    const audio = new Audio(url(`media/${mediaPath}`));
-    activeAudio = audio;
-    audio.muted = muted;
-    bubbleAnchor = entry;
-    highlightedSpan = null;
-    bubble.hidden = !settings.bubblesVisible;
-    const wordSpans = new Map<number, HTMLSpanElement>();
-    bubble.replaceChildren(
-      ...wordFragments(event.text, event.words).map((fragment) => {
-        if (fragment.word === null)
-          return document.createTextNode(fragment.text);
-        const span = document.createElement("span");
-        span.textContent = fragment.text;
-        wordSpans.set(fragment.word, span);
-        return span;
-      }),
+    dimensions.bee = bee.node.metadata.localDims;
+    applySettings(settings);
+    const scene = bee.node.getScene();
+    await scene.whenReadyAsync();
+    await new Promise<void>((resolve) =>
+      scene.onAfterRenderObservable.addOnce(() => resolve()),
     );
-    bubble.scrollTop = 0;
-    placeBubble();
-    let frame = 0;
-    let speaking = false;
-    let highlightedWord = -1;
-    const animate = () => {
-      if (disposed || generation !== playGeneration) return;
-      const ms = audio.currentTime * 1000;
-      const current = event.words.findIndex(
-        (w) => ms >= w.startMs && ms < w.startMs + w.durationMs,
-      );
-      const talking =
-        !audio.paused && (event.words.length === 0 || current >= 0);
-      if (talking !== speaking) {
-        speaking = talking;
-        if (entry) {
-          if (talking) void entry.puppet.talk();
-          else void entry.puppet.shutup();
-        } else {
-          const group = bee?.animationGroups.find((a) => a.name === "talking");
-          if (talking) group?.start(true);
-          else group?.stop();
-        }
-      }
-      if (event.words.length && current >= 0 && current !== highlightedWord) {
-        wordSpans.get(highlightedWord)?.classList.remove("current-word");
-        highlightedWord = current;
-        highlightedSpan = wordSpans.get(current) ?? null;
-        highlightedSpan?.classList.add("current-word");
-        followHighlightedWord();
-      }
-      frame = requestAnimationFrame(animate);
-    };
-    const finish = () => {
-      cancelAnimationFrame(frame);
-      audio.onended = null;
-      audio.onerror = null;
-      if (entry) void entry.puppet.shutup();
-      else bee?.animationGroups.find((a) => a.name === "talking")?.stop();
-      if (generation !== playGeneration) return;
-      activeAudio = null;
-      cleanupSpeech = null;
-      playing = false;
-      bubbleAnchor = undefined;
-      highlightedSpan = null;
-      bubble.hidden = true;
-      void playNext();
-    };
-    cleanupSpeech = () => {
-      cancelAnimationFrame(frame);
-      audio.onended = null;
-      audio.onerror = null;
-    };
-    audio.onended = finish;
-    audio.onerror = finish;
-    try {
-      await audio.play();
-      if (generation === playGeneration) animate();
-      else audio.pause();
-    } catch (error) {
-      console.warn("Audio playback was blocked or unavailable", error);
-      finish();
+  })();
+  void ready.catch(report);
+  const resize = new ResizeObserver(() => {
+    // screenToWorld uses the camera's engine aspect ratio as well as our local
+    // viewport. Update that ratio before computing the responsive placement.
+    bee?.node.getScene().getEngine().resize();
+    placeBee();
+    for (const e of entries.values()) applyEntry(e);
+    refreshCaption();
+    applyBubbleOptions();
+  });
+  resize.observe(container);
+  function stop() {
+    speechGeneration++;
+    speechMetadata.clear();
+    activeSpeech = null;
+    runtime?.interruptSpeech("desktop cancellation");
+    for (const e of entries.values()) applyEntry(e);
+    updateVolume();
+  }
+  async function consume(event: OverlayEvent) {
+    if (disposed) return;
+    if (event.type === "overlay_settings") {
+      applySettings(event.settings);
+      return;
     }
+    if (event.type === "audio_settings") {
+      audioMix = { ...event.settings };
+      updateVolume();
+      return;
+    }
+    if (event.type === "stop_speech") {
+      stop();
+      return;
+    }
+    if (event.type === "signal") {
+      await signals.start(event);
+      return;
+    }
+    if (event.type === "stop_signal") {
+      signals.stop(event.id);
+      return;
+    }
+    if (event.type === "voice_transcript") {
+      if (!event.isOwner) return;
+      clearTimeout(streamerTimer);
+      streamerCaption?.dispose();
+      streamerCaption = null;
+      if (!event.text.trim() || !settings.streamerVoiceBubble.enabled) {
+        refreshCaption();
+        return;
+      }
+      streamerPreview?.dispose();
+      streamerPreview = null;
+      streamerCaption = createBubbleRenderer({
+        ...streamerOptions(),
+        text: event.text,
+      });
+      streamerCaption.show();
+      streamerTimer = setTimeout(() => {
+        streamerCaption?.dispose();
+        streamerCaption = null;
+        refreshCaption();
+      }, 6000);
+      return;
+    }
+    if (event.type === "hide_image") {
+      presentation.replaceChildren();
+      presentation.hidden = true;
+      return;
+    }
+    if (event.type === "image" || event.type === "presentation") {
+      presentation.replaceChildren();
+      const title = document.createElement("h2");
+      title.textContent = event.title.slice(0, 200);
+      presentation.append(title);
+      if (event.type === "image") {
+        const file = event.image_path.replace(/^media\//, "");
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(file)) {
+          presentation.hidden = true;
+          return;
+        }
+        const img = document.createElement("img");
+        img.alt = event.title;
+        img.src = url(`media/${file}`);
+        presentation.append(img);
+      } else {
+        const text = document.createElement("p");
+        text.textContent = event.text.slice(0, 6000);
+        presentation.append(text);
+      }
+      presentation.hidden = false;
+      return;
+    }
+    const generation = speechGeneration;
+    await ready;
+    if (disposed || generation !== speechGeneration) return;
+    if (event.type === "chat" || event.type === "chatter_changed") {
+      if (event.type === "chat") lastChatKey = identity(event.chatter);
+      if (settings.puppet.showWhenIdle || entries.has(identity(event.chatter)))
+        await ensure(event.chatter);
+      for (const entry of entries.values()) applyEntry(entry);
+      return;
+    }
+    if (event.type !== "speech" || received.has(event.id)) return;
+    const file = event.audio_path.replace(/^media\//, "");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(file)) return;
+    received.add(event.id);
+    if (received.size > 256) received.delete(received.values().next().value!);
+    const s = event.chatter ? settings.puppet : settings.bumblebee;
+    const target: SpeechTarget = event.chatter
+      ? {
+          type: "puppet",
+          id: event.chatter.puppetId,
+          instanceId: identity(event.chatter),
+          imageUrl: image(event.chatter),
+          hideAfterSpeech: !settings.puppet.showWhenIdle,
+        }
+      : { type: "bumblebee" };
+    speechMetadata.set(event.id, event);
+    void runtime!
+      .say({
+        id: event.id,
+        target,
+        text: event.text,
+        audio: { url: url(`media/${file}`), words: event.words },
+        visuals: event.chatter
+          ? settings.puppet.enabled
+          : settings.bumblebee.visible,
+        bubbles: s.chatBubblesEnabled,
+        nameplates: !!event.chatter && settings.puppet.nameplatesEnabled,
+        nameplateText: event.chatter?.displayName,
+        platform: event.chatter?.platform as
+          "discord" | "twitch" | "youtube" | undefined,
+        chatBubbleStyle: style(s.chatBubbleStyleId),
+      })
+      .catch(report)
+      .finally(() => speechMetadata.delete(event.id));
   }
   return {
     ready,
+    consume,
+    applySettings,
+    getDimensions: () => structuredClone(dimensions),
     async verifyRenderedFrame() {
       await ready;
-      if (disposed)
-        throw new Error("Renderer was disposed before verification");
-      const engine = scene.getEngine();
-      // Read immediately after drawing: the normal canvas need not preserve its drawing buffer.
+      if (disposed || !bee)
+        throw new Error("Renderer disposed before verification");
+      const scene = bee.node.getScene(),
+        engine = scene.getEngine();
       scene.render();
       const pixels = await engine.readPixels(
         0,
@@ -398,86 +564,36 @@ export function createStage(
         pixels.byteLength,
       );
       let visible = 0;
-      for (let index = 3; index < bytes.length; index += 4)
-        if (bytes[index] > 0) visible++;
+      for (let i = 3; i < bytes.length; i += 4) if (bytes[i] > 0) visible++;
       if (visible < 20)
         throw new Error("The bee canvas rendered no visible model pixels");
-      // Give the native compositor a chance to present the frame before the smoke process exits.
       await new Promise<void>((resolve) =>
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
       );
     },
-    async consume(event: OverlayEvent) {
-      if (disposed) return;
-      if (event.type === "overlay_settings") {
-        applySettings(event.settings);
-        return;
-      }
-      if (event.type === "stop_speech") {
-        stop();
-        return;
-      }
-      if (event.type === "hide_image") {
-        presentation.replaceChildren();
-        presentation.hidden = true;
-        return;
-      }
-      if (event.type === "image" || event.type === "presentation") {
-        presentation.replaceChildren();
-        const title = document.createElement("h2");
-        title.textContent = event.title.slice(0, 200);
-        presentation.appendChild(title);
-        if (event.type === "image") {
-          const file = event.image_path.replace(/^media\//, "");
-          if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(file)) {
-            presentation.hidden = true;
-            return;
-          }
-          const image = document.createElement("img");
-          image.alt = event.title;
-          image.src = url(`media/${file}`);
-          presentation.appendChild(image);
-        } else {
-          const text = document.createElement("p");
-          text.textContent = event.text.slice(0, 6000);
-          presentation.appendChild(text);
-        }
-        presentation.hidden = false;
-        return;
-      }
-      if (event.type === "chat" || event.type === "chatter_changed") {
-        if (event.type === "chat" || entries.has(key(event.chatter)))
-          await ensure(event.chatter);
-      } else if (event.type === "speech" && !received.has(event.id)) {
-        received.add(event.id);
-        if (received.size > 256)
-          received.delete(received.values().next().value!);
-        if (queue.length >= 8) queue.shift();
-        queue.push(event);
-        void playNext();
-      }
-    },
     setMuted(value: boolean) {
       muted = value;
-      if (activeAudio) activeAudio.muted = value;
+      updateVolume();
+    },
+    setEditing(value: boolean) {
+      if (editing === value) return;
+      editing = value;
+      for (const entry of entries.values()) applyEntry(entry);
+      refreshCaption();
+      syncPreview();
     },
     dispose() {
       disposed = true;
       stop();
       resize.disconnect();
-      scene.onBeforeRenderObservable.remove(beforeRender);
-      for (const entry of entries.values()) {
-        entry.label.remove();
-        void entry.puppet.dispose();
-      }
-      entries.clear();
-      bubble.remove();
+      signals.dispose();
+      clearTimeout(streamerTimer);
+      streamerCaption?.dispose();
+      streamerPreview?.dispose();
       presentation.remove();
-      const engine = scene.getEngine();
-      const canvas = engine.getRenderingCanvas();
-      scene.dispose();
-      engine.dispose();
-      canvas?.remove();
+      entries.clear();
+      void signalContext?.close();
+      void runtime?.dispose().catch(report);
     },
   };
 }

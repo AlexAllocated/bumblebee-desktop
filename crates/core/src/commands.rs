@@ -207,6 +207,7 @@ mod tests {
 			channel_id: "channel".into(),
 			text: text.into(),
 			is_owner: false,
+			access: Default::default(),
 		}
 	}
 	#[tokio::test]

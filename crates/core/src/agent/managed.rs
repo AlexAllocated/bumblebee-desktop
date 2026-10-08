@@ -136,7 +136,7 @@ pub async fn execute(
 					content.push(json!({"type":"input_image","image_url":format!("data:{};base64,{}",image.media_type,base64::engine::general_purpose::STANDARD.encode(image.bytes))}));
 				}
 			}
-			let mut tool = json!({"type":"image_generation","model":"gpt-image-1.5","quality":"medium","size":"1024x1024","output_format":"png","background":args["background"]});
+			let mut tool = json!({"type":"image_generation","model":engine.store.settings()?.image_model,"quality":"medium","size":"1024x1024","output_format":"png","background":args["background"]});
 			tool["action"] = json!(if name == "editImage" {
 				"edit"
 			} else {

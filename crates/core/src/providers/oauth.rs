@@ -76,6 +76,20 @@ pub struct Authorization {
 	pub expires_in: u64,
 }
 
+pub fn required_twitch_scopes_for_settings(settings: &crate::model::Settings) -> Vec<&'static str> {
+	let mut scopes =
+		crate::agent::platform_tools::required_twitch_scopes(&settings.enabled_tool_groups);
+	let policy = &settings.chat_platforms.twitch;
+	if (!policy.mentions.everyone && policy.mentions.followers)
+		|| (!policy.readout.everyone && policy.readout.followers)
+	{
+		scopes.push("moderator:read:followers");
+	}
+	scopes.sort_unstable();
+	scopes.dedup();
+	scopes
+}
+
 impl Providers {
 	pub async fn authorize_twitch(
 		self: &Arc<Self>,
@@ -85,9 +99,7 @@ impl Providers {
 		let flow = self.oauth_cancellation.lock().unwrap().child_token();
 		let guard = tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Authorization canceled"),_=flow.cancelled()=>anyhow::bail!("Authorization superseded"),guard=self.oauth_lock.clone().lock_owned()=>guard};
 		let settings = self.store.settings()?;
-		let scopes =
-			crate::agent::platform_tools::required_twitch_scopes(&settings.enabled_tool_groups)
-				.join(" ");
+		let scopes = required_twitch_scopes_for_settings(&settings).join(" ");
 		let client_id = settings.twitch_client_id;
 		ensure!(
 			!client_id.trim().is_empty(),

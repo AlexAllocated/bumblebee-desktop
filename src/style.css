@@ -1,4 +1,4 @@
-@import url("./renderer/speech-bubbles/style.css");
+@import url("@hivetech/speech-bubbles/style.css");
 :root {
   font-family: Inter, "Segoe UI", system-ui, sans-serif;
   color: #e9ecec;
@@ -779,4 +779,227 @@ code {
 .artifact-preview p {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* The dashboard is a layout workspace; setup lives in the Settings drawer. */
+.desktop-header {
+  height: 78px;
+  padding: 0 28px;
+}
+.desktop-header .brand strong {
+  font-size: 24px;
+}
+.desktop-header .brand img {
+  width: 42px;
+  height: 48px;
+}
+.workspace-main {
+  max-width: 1920px;
+  padding: 22px 28px 28px;
+}
+.overlay-toolbar {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 15px;
+  border-bottom: 1px solid var(--border);
+}
+.overlay-address {
+  display: flex;
+  flex: 1;
+  max-width: 840px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+}
+.overlay-address input {
+  font-size: 11px;
+  padding: 8px 10px;
+  color: #a7b6b9;
+  background: #121c20;
+}
+.settings-button {
+  border-color: #857144;
+  color: var(--honey);
+  background: #f5ca6912;
+  white-space: nowrap;
+}
+.editor-canvas {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 48% 65%, #243c36aa, transparent 70%),
+    radial-gradient(#91a99e24 1px, transparent 1px), #162329;
+  background-size:
+    auto,
+    24px 24px,
+    auto;
+}
+.editor-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 15px;
+  border-top: 1px solid var(--border);
+  color: #8ea29f;
+  font-size: 10px;
+}
+.editor-footer > div {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+}
+.editor-footer .compact {
+  font-size: 10px;
+}
+.connection-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px 0;
+}
+.connection-strip button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #29373b;
+  background: #172125;
+  padding: 8px 12px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+.connection-strip button:hover {
+  background: #223237;
+}
+.connection-strip strong {
+  font-weight: 550;
+}
+.connection-strip span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.connection-strip i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #718384;
+}
+.connection-strip i.connected {
+  background: var(--green);
+}
+.conversation-panel summary {
+  padding: 14px 18px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #cbd5d5;
+}
+.conversation-panel summary span {
+  float: right;
+  color: var(--muted);
+  font-size: 10px;
+}
+.settings-body p {
+  font-size: 12px;
+  color: #acbabc;
+  line-height: 1.65;
+}
+.settings-body small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #8ea1a6;
+}
+.settings-body textarea {
+  font: inherit;
+  width: 100%;
+  background: #141c20;
+  border: 1px solid #3c484d;
+  border-radius: 7px;
+  color: #eef0ec;
+  padding: 10px;
+  resize: vertical;
+}
+.settings-footer-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+}
+.settings-footer-actions small {
+  font-size: 10px;
+  color: var(--muted);
+}
+.settings-footer-actions button {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.rotation-confirm {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 15px;
+  background: #3b3424;
+  font-size: 12px;
+}
+.rotation-confirm span {
+  flex: 1;
+}
+.rotation-confirm button {
+  font-size: 11px;
+  padding: 8px 10px;
+}
+.profile {
+  align-items: flex-start;
+}
+@media (max-width: 800px) {
+  .desktop-header {
+    padding: 0 16px;
+    height: 68px;
+  }
+  .workspace-main {
+    padding: 14px 12px;
+  }
+  .overlay-toolbar {
+    gap: 8px;
+    padding: 10px;
+  }
+  .overlay-address > span {
+    display: none;
+  }
+  .editor-footer {
+    padding: 8px 10px;
+  }
+  .editor-footer > span {
+    max-width: 220px;
+    line-height: 1.5;
+  }
+  .connection-strip {
+    gap: 6px;
+  }
+  .connection-strip button {
+    padding: 7px 9px;
+  }
+  .connection-strip span {
+    display: none;
+  }
+}
+
+.settings-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.overlay-workspace,
+.connection-strip,
+.conversation-panel {
+  max-width: min(100%, calc(max(360px, 100dvh - 245px) * 16 / 9));
+  margin-inline: auto;
 }

@@ -1,8 +1,11 @@
 //! Application-owned sessions with bounded input and speech queues.
+mod captions;
 mod queue;
+mod retained;
+mod signals;
 use crate::{
 	commands,
-	model::{ChatMessage, Chatter, OverlayEvent},
+	model::{ChatMessage, Chatter, OverlayEvent, Settings},
 	providers::Providers,
 	speech::Speech,
 	storage::Store,
@@ -15,7 +18,7 @@ use std::{
 	path::PathBuf,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU8, Ordering},
 	},
 	time::Duration,
 };
@@ -41,6 +44,12 @@ pub struct Engine {
 	audio_runtime: Mutex<Option<Arc<AudioRuntime>>>,
 	speech_lock: Mutex<()>,
 	preview_cancel: Mutex<CancellationToken>,
+	voice_activity: Mutex<HashMap<String, std::time::Instant>>,
+	speaker_intros: Mutex<retained::SpeakerIntros>,
+	speech_is_chatter: AtomicBool,
+	cue_cancel: std::sync::Mutex<CancellationToken>,
+	cue_kind: AtomicU8,
+	caption_cancel: std::sync::Mutex<CancellationToken>,
 }
 struct Session {
 	cancel: CancellationToken,
@@ -53,8 +62,8 @@ struct Session {
 	voice_cancel: CancellationToken,
 }
 struct SpeechJob {
-	text: String,
-	chatter: Option<Chatter>,
+	source: ChatMessage,
+	queued_at: std::time::Instant,
 	cancel: CancellationToken,
 }
 struct Capture {
@@ -86,6 +95,12 @@ impl Engine {
 			audio_runtime: Mutex::new(None),
 			speech_lock: Mutex::new(()),
 			preview_cancel: Mutex::new(CancellationToken::new()),
+			voice_activity: Mutex::new(HashMap::new()),
+			speaker_intros: Mutex::new(Default::default()),
+			speech_is_chatter: AtomicBool::new(false),
+			cue_cancel: std::sync::Mutex::new(CancellationToken::new()),
+			cue_kind: AtomicU8::new(0),
+			caption_cancel: std::sync::Mutex::new(CancellationToken::new()),
 		}))
 	}
 	pub fn is_active(&self) -> bool {
@@ -140,7 +155,7 @@ impl Engine {
         }));
 		let engine = self.clone();
 		let token = cancel.clone();
-		jobs.push(tokio::spawn(async move{loop{tokio::select!{_=token.cancelled()=>break,job=speech_rx.recv()=>match job{Some(job)=>if !job.cancel.is_cancelled(){if let Err(error)=engine.speak(&job.text,job.chatter,job.cancel).await{if !token.is_cancelled(){engine.emit(OverlayEvent::Status{message:error.to_string()});}}},None=>break}}}}));
+		jobs.push(tokio::spawn(async move{loop{tokio::select!{_=token.cancelled()=>break,job=speech_rx.recv()=>match job{Some(job)=>if !job.cancel.is_cancelled(){if let Err(error)=engine.run_speech_job(job).await{if !token.is_cancelled(){engine.emit(OverlayEvent::Status{message:error.to_string()});}}},None=>break}}}}));
 		let engine = self.clone();
 		let token = cancel.clone();
 		jobs.push(tokio::spawn(run_agent_queue(
@@ -239,6 +254,8 @@ impl Engine {
 		Ok(())
 	}
 	pub async fn stop(&self) -> Result<()> {
+		self.cancel_signals();
+		self.clear_streamer_caption()?;
 		let _lifecycle = self.lifecycle.lock().await;
 		let session = self.session.lock().await.take();
 		self.active.store(false, Ordering::SeqCst);
@@ -265,12 +282,16 @@ impl Engine {
 		self.store.recover_interrupted()?;
 		self.store.recover_agent_state()?;
 		self.emit(OverlayEvent::StopSpeech);
+		self.providers.set_stream_chat_destination("twitch", None);
+		self.providers.set_stream_chat_destination("youtube", None);
 		self.emit(OverlayEvent::Status {
 			message: "Session stopped".into(),
 		});
 		Ok(())
 	}
 	pub async fn cancel(&self) {
+		self.cancel_signals();
+		let _ = self.clear_streamer_caption();
 		if let Some(session) = self.session.lock().await.as_mut() {
 			let epoch = session.agent_scopes.cancel_all(&session.cancel);
 			session.input_epoch.send_replace(epoch);
@@ -313,6 +334,15 @@ impl Engine {
 		if cancel.is_cancelled() {
 			return Ok(());
 		}
+		if self.store.settings()?.audio_output == "discord" {
+			ensure!(
+				self
+					.audio()
+					.await
+					.is_some_and(|audio| audio.has_voice_presence()),
+				"Join the configured Discord voice channel, or choose OBS overlay output in Settings"
+			);
+		}
 		let voices = self.store.catalog_voices()?;
 		let voice_id = chatter
 			.as_ref()
@@ -323,20 +353,33 @@ impl Engine {
 		if cancel.is_cancelled() {
 			return Ok(());
 		}
+		let settings = self.store.settings()?;
+		let gain = (settings.master_volume
+			* if chatter.is_some() {
+				settings.puppet_tts_volume
+			} else {
+				settings.bumblebee_tts_volume
+			})
+		.clamp(0., 2.);
+		self
+			.speech_is_chatter
+			.store(chatter.is_some(), Ordering::SeqCst);
 		self.emit(OverlayEvent::Speech {
 			id: uuid::Uuid::new_v4().to_string(),
 			chatter,
 			text: text.into(),
 			audio_path: speech.filename,
+			audible: settings.audio_output == "overlay",
+			gain,
 			words: speech.words,
 		});
 		if let Some(audio) = self.audio().await {
-			if audio.has_voice_presence() {
+			if settings.audio_output == "discord" && audio.has_voice_presence() {
 				let result = audio
 					.play_audio(
 						speech.wav,
 						bumblebee_audio::PlaybackInputType::Encoded,
-						1.0,
+						gain,
 						cancel.clone(),
 					)
 					.await;
@@ -410,6 +453,14 @@ impl Engine {
 				.context("Bumblebee's conversation queue is full; try again shortly")?;
 			return Ok(());
 		}
+		if self
+			.store
+			.settings()?
+			.platform_policy(&message.platform)
+			.is_some_and(|policy| !policy.monitor)
+		{
+			return Ok(());
+		}
 		let images = self.paths.data_dir.join("images");
 		let command = tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),result=commands::handle(
 		 &self.store,
@@ -438,13 +489,16 @@ impl Engine {
 		let settings = self.store.settings()?;
 		let private_dm =
 			message.platform == "discord" && message.channel_id != settings.discord_text_channel_id;
-		if !private_dm {
+		if !private_dm && chatter.overrides.chat_puppet != crate::model::Override::Block {
 			self.emit(OverlayEvent::Chat {
 				chatter: chatter.clone(),
 				text: message.text.clone(),
 			});
 		}
 
+		if !private_dm {
+			self.relay_chat(&message, &chatter, &cancel).await?;
+		}
 		let mut session = self.session.lock().await;
 		let Some(session) = session.as_mut() else {
 			return Ok(());
@@ -453,7 +507,7 @@ impl Engine {
 			return Ok(());
 		}
 		if crate::agent::pending_for_message(&self.store, &message)?
-			|| (settings.ai_enabled
+			|| (settings.permits_ai(&message, &chatter.overrides, message.is_owner)
 				&& (text.starts_with("!bee ")
 					|| text.contains("bumblebee")
 					|| message.platform == "discord_voice"
@@ -463,16 +517,30 @@ impl Engine {
 				&crate::agent::pending_actor_for_message(&self.store, &message)?
 					.unwrap_or_else(|| crate::agent_storage::actor(&message)),
 			);
+			if settings.chat_ai_dictation_enabled
+				&& !private_dm
+				&& message.platform != "discord_voice"
+				&& settings.readout_allowed(&message, &chatter.overrides, message.is_owner)
+			{
+				let _ = session.speech_tx.try_send(SpeechJob {
+					source: message.clone(),
+					queued_at: std::time::Instant::now(),
+					cancel: session.speech_cancel.child_token(),
+				});
+			}
 			session
 				.agent_tx
 				.try_send(AgentJob { message, scope })
 				.context("Bumblebee's conversation queue is full; try again shortly")?;
-		} else if settings.read_chat && !private_dm && message.platform != "discord_voice" {
+		} else if settings.readout_allowed(&message, &chatter.overrides, message.is_owner)
+			&& !private_dm
+			&& message.platform != "discord_voice"
+		{
 			session
 				.speech_tx
 				.try_send(SpeechJob {
-					text: message.text.chars().take(6000).collect(),
-					chatter: Some(chatter),
+					source: message,
+					queued_at: std::time::Instant::now(),
 					cancel: session.speech_cancel.child_token(),
 				})
 				.context("The speech queue is full")?;
@@ -525,33 +593,44 @@ impl Engine {
 			session.voice_cancel.cancel();
 			session.voice_cancel = session.cancel.child_token();
 		}
-		let presence =
-			if settings.discord_guild_id.is_empty() || settings.discord_voice_channel_id.is_empty() {
-				None
-			} else {
-				Some(bumblebee_audio::PresenceConfig {
-					guild_id: settings.discord_guild_id,
-					channel_id: settings.discord_voice_channel_id,
-					require_speak: true,
-					listen_everyone: settings.discord_listen_everyone,
-					listen_role_ids: settings.discord_listen_role_ids,
-					listen_allowed_user_ids: settings.discord_listen_allowed_user_ids,
-					listen_blocked_user_ids: settings.discord_listen_blocked_user_ids,
-					owner_discord_id: (!settings.owner_discord_id.is_empty())
-						.then_some(settings.owner_discord_id),
-					replay_buffer_enabled: settings.replay_enabled,
-					replay_buffer_seconds: settings.replay_seconds,
-					wake_word: if settings.wake_word == "bumblebee" {
-						bumblebee_audio::VoiceWakeWord::Bumblebee
-					} else {
-						bumblebee_audio::VoiceWakeWord::HeyBumblebee
-					},
-					wake_keyword_sensitivity: bumblebee_audio::VoiceKeywordSensitivity::Balanced,
-					stop_keyword_sensitivity: bumblebee_audio::VoiceKeywordSensitivity::Balanced,
-					cancel_keyword_sensitivity: bumblebee_audio::VoiceKeywordSensitivity::Balanced,
-				})
-			};
+		let presence = if settings.discord_guild_id.is_empty()
+			|| settings.discord_voice_channel_id.is_empty()
+		{
+			None
+		} else {
+			Some(bumblebee_audio::PresenceConfig {
+				guild_id: settings.discord_guild_id,
+				channel_id: settings.discord_voice_channel_id,
+				require_speak: true,
+				listen_everyone: settings.discord_listen_everyone,
+				listen_role_ids: settings.discord_listen_role_ids,
+				listen_allowed_user_ids: settings.discord_listen_allowed_user_ids,
+				listen_blocked_user_ids: settings.discord_listen_blocked_user_ids,
+				owner_discord_id: (!settings.owner_discord_id.is_empty())
+					.then_some(settings.owner_discord_id),
+				replay_buffer_enabled: settings.replay_enabled,
+				replay_buffer_seconds: settings.replay_seconds,
+				wake_word: if settings.wake_word == "bumblebee" {
+					bumblebee_audio::VoiceWakeWord::Bumblebee
+				} else {
+					bumblebee_audio::VoiceWakeWord::HeyBumblebee
+				},
+				wake_keyword_sensitivity: retained::sensitivity(&settings.wake_keyword_sensitivity),
+				stop_keyword_sensitivity: retained::sensitivity(&settings.stop_keyword_sensitivity),
+				cancel_keyword_sensitivity: retained::sensitivity(&settings.cancel_keyword_sensitivity),
+			})
+		};
 		audio.configure_presence(presence).await
+	}
+	fn voice_agent_enabled(&self, user_id: &str) -> Result<bool> {
+		let settings = self.store.settings()?;
+		Ok(settings.ai_enabled
+			&& settings.voice_mentions_enabled
+			&& self
+				.store
+				.chatter("discord", user_id)
+				.map(|p| p.overrides.ai_access != crate::model::Override::Block)
+				.unwrap_or(true))
 	}
 	async fn begin_voice_capture(
 		&self,
@@ -563,7 +642,7 @@ impl Engine {
 			return Ok(None);
 		}
 		let mut session = self.session.lock().await;
-		if !self.store.settings()?.ai_enabled {
+		if !self.voice_agent_enabled(user_id)? {
 			return Ok(None);
 		}
 		let Some(session) = session
@@ -599,6 +678,7 @@ impl Engine {
 			.providers
 			.status("discord", "connected", "Discord gateway connected");
 		let mut captures = HashMap::<String, Capture>::new();
+		let mut caption_captures = HashMap::<String, captions::CaptionCapture>::new();
 		let mut sequence = None;
 		let mut transcriptions = JoinSet::<Result<()>>::new();
 		let result:Result<()>=async {loop {tokio::select!{
@@ -609,19 +689,28 @@ impl Engine {
             incoming=chat.recv()=>{let Some(incoming)=incoming else{break};let current=self.store.settings()?;
                 let private_dm=incoming.guild_id.is_empty();
                 if !private_dm&&(incoming.channel_id!=current.discord_text_channel_id||incoming.guild_id!=current.discord_guild_id){continue}
-                let message=ChatMessage{platform:"discord".into(),is_owner:incoming.user_id==current.owner_discord_id,user_id:incoming.user_id,display_name:incoming.display_name,message_id:incoming.id,channel_id:incoming.channel_id,text:incoming.text};
+                let message=ChatMessage{platform:"discord".into(),is_owner:incoming.user_id==current.owner_discord_id, access:crate::model::ChatAccess{role_ids:incoming.role_ids,moderator:incoming.moderator,..Default::default()},user_id:incoming.user_id,display_name:incoming.display_name,message_id:incoming.id,channel_id:incoming.channel_id,text:incoming.text};
                 if private_dm&&!message.is_owner&&!crate::agent::pending_for_message(&self.store,&message)?{continue}
                 tokio::select!{_=cancel.cancelled()=>break,r=messages.send(message)=>r?};
             },
             incoming=events.recv()=>{let Some(incoming)=incoming else{break};
-                if sequence.is_some_and(|previous|incoming.sequence!=previous+1){for (user,capture) in &captures{capture.cancel.cancel();audio.stream_participant(user,false);}captures.clear();}
+                if sequence.is_some_and(|previous|incoming.sequence!=previous+1){for (user,capture) in caption_captures.drain(){capture.cancel.cancel();audio.stream_participant(&user,false);}for (user,capture) in &captures{capture.cancel.cancel();audio.stream_participant(user,false);}captures.clear();}
                 sequence=Some(incoming.sequence);
                 match incoming.event {
+                    VoiceEvent::ParticipantJoined{user_id,username,..}=>{self.store.ensure_chatter("discord",&user_id,&username)?;},
+                    VoiceEvent::SpeakingStarted{user_id,username}=>{
+                        if !caption_captures.contains_key(&user_id){if let Some(capture)=self.begin_caption(&audio,&user_id,&username).await?{caption_captures.insert(user_id.clone(),capture);audio.stream_participant(&user_id,true);}}
+                    },
+                    VoiceEvent::VoiceActivity{user_id,username,vad_active,..}=>{
+                        if vad_active {self.voice_activity.lock().await.insert(user_id.clone(),std::time::Instant::now());}
+                        if vad_active&&!caption_captures.contains_key(&user_id){if let Some(capture)=self.begin_caption(&audio,&user_id,&username).await?{caption_captures.insert(user_id.clone(),capture);audio.stream_participant(&user_id,true);}}
+                    },
                     VoiceEvent::KeywordDetected{user_id,username,keyword_kind,..}=>{
                         if keyword_kind=="wake"{
                             if captures.len()>=4&&!captures.contains_key(&user_id){continue}
                             let Some(capture)=self.begin_voice_capture(&user_id,username,audio.is_listen_allowed(&user_id)).await? else {continue};
                             audio.stream_participant(&user_id,true);
+                            let engine=self.clone();let cue=capture.cancel.clone();tokio::spawn(async move{let _=engine.play_cue(bumblebee_audio::SignalKey::WakeChirp,cue).await;});
                             if let Some(previous)=captures.insert(user_id,capture){previous.cancel.cancel();}
                         }
                         else if keyword_kind=="cancel"||keyword_kind=="stop"{
@@ -639,9 +728,14 @@ impl Engine {
                         }
                     },
                     VoiceEvent::AudioFrame{user_id,sample_rate_hz,channels,..}=>{
-                        if let Some(capture)=captures.get_mut(&user_id){if !capture.cancel.is_cancelled()&&!capture.actor_scope.cancel.is_cancelled()&&audio.is_listen_allowed(&user_id)&&sample_rate_hz==16000&&channels==1&&capture.pcm.len()+incoming.payload.len()<=16000*2*120{capture.pcm.extend(incoming.payload);}else{captures.remove(&user_id);audio.stream_participant(&user_id,false);}}
+                        if let Some(capture)=caption_captures.get_mut(&user_id){if capture.cancel.is_cancelled()||!self.caption_allowed_cached(&audio,&user_id)?||sample_rate_hz!=16000||channels!=1||capture.pcm.len()+incoming.payload.len()>16000*2*120 {caption_captures.remove(&user_id);}else{capture.pcm.extend_from_slice(&incoming.payload);}}
+                        if let Some(capture)=captures.get_mut(&user_id){if !capture.cancel.is_cancelled()&&!capture.actor_scope.cancel.is_cancelled()&&audio.is_listen_allowed(&user_id)&&sample_rate_hz==16000&&channels==1&&capture.pcm.len()+incoming.payload.len()<=16000*2*120{capture.pcm.extend(incoming.payload);}else{captures.remove(&user_id);}}
+                        if !captures.contains_key(&user_id)&&!caption_captures.contains_key(&user_id){audio.stream_participant(&user_id,false);}
                     },
-                    VoiceEvent::UtteranceFinalized{user_id,..}=>{audio.stream_participant(&user_id,false);if let Some(capture)=captures.remove(&user_id){
+                    VoiceEvent::UtteranceFinalized{user_id,..}=>{
+                        audio.stream_participant(&user_id,false);
+                        if let Some(capture)=caption_captures.remove(&user_id){if transcriptions.len()<4&&!capture.cancel.is_cancelled(){let engine=self.clone();let caption_user=user_id.clone();transcriptions.spawn(async move{engine.transcribe_caption(caption_user,capture).await});}}
+                        if let Some(capture)=captures.remove(&user_id){
                         if capture.cancel.is_cancelled()||capture.actor_scope.cancel.is_cancelled(){continue}
                         if transcriptions.len()>=4{self.emit(OverlayEvent::Status{message:"Voice transcription is busy; please try again".into()});continue}
                         let engine=self.clone();
@@ -653,14 +747,17 @@ impl Engine {
                             if let Some(message)=message {engine.dispatch_transcription(message,voice_cancel,scope).await} else {Ok(())}
                         });
                     }},
-                    VoiceEvent::ParticipantLeft{user_id}|VoiceEvent::NoSpeech{user_id,..}=>{captures.remove(&user_id);audio.stream_participant(&user_id,false);},
-                    VoiceEvent::SourceDown{..}=>{captures.clear();self.cancel().await;},
+                    VoiceEvent::ParticipantLeft{user_id}=>{captures.remove(&user_id);caption_captures.remove(&user_id);audio.stream_participant(&user_id,false);self.voice_activity.lock().await.remove(&user_id);if user_id==self.store.settings()?.owner_discord_id{self.clear_streamer_caption()?;}},
+                    VoiceEvent::NoSpeech{user_id,..}=>{captures.remove(&user_id);caption_captures.remove(&user_id);audio.stream_participant(&user_id,false);},
+                    VoiceEvent::SourceDown{..}=>{captures.clear();caption_captures.clear();self.clear_streamer_caption()?;self.voice_activity.lock().await.clear();self.cancel().await;},
                     _=>{}
                 }
             }
         }}Ok(())}.await;
 		transcriptions.abort_all();
 		while transcriptions.join_next().await.is_some() {}
+		self.clear_streamer_caption()?;
+		self.voice_activity.lock().await.clear();
 		audio.shutdown().await;
 		*self.audio_runtime.lock().await = None;
 		self
@@ -679,7 +776,7 @@ impl Engine {
 			return Ok(None);
 		}
 		let settings = self.store.settings()?;
-		if !settings.ai_enabled {
+		if !self.voice_agent_enabled(&user_id)? {
 			return Ok(None);
 		}
 		let audio = self
@@ -689,7 +786,7 @@ impl Engine {
 		let allowed = tokio::select! {_=cancel.cancelled()=>return Ok(None),allowed=audio.revalidate_listener(&user_id)=>allowed?};
 		ensure!(allowed, "Voice requester is no longer permitted");
 		// Settings may have changed while live Discord permission checks were in flight.
-		if cancel.is_cancelled() || !self.store.settings()?.ai_enabled {
+		if cancel.is_cancelled() || !self.voice_agent_enabled(&user_id)? {
 			return Ok(None);
 		}
 		let wav = pcm_wav(&capture.pcm);
@@ -713,7 +810,7 @@ impl Engine {
 		let allowed = tokio::select! {_=cancel.cancelled()=>return Ok(None),allowed=audio.revalidate_listener(&user_id)=>allowed?};
 		ensure!(allowed, "Voice permission changed during transcription");
 		let current = self.store.settings()?;
-		if !current.ai_enabled {
+		if !self.voice_agent_enabled(&user_id)? {
 			return Ok(None);
 		}
 		ensure!(
@@ -724,6 +821,7 @@ impl Engine {
 		let message = ChatMessage {
 			platform: "discord_voice".into(),
 			is_owner: user_id == current.owner_discord_id,
+			access: Default::default(),
 			user_id,
 			display_name: capture.username,
 			message_id: uuid::Uuid::new_v4().to_string(),
@@ -747,7 +845,7 @@ impl Engine {
 				.handle_chat_scoped(message, scope.cancel.child_token())
 				.await;
 		}
-		if !self.store.settings()?.ai_enabled {
+		if !self.store.settings()?.ai_enabled || !self.store.settings()?.voice_mentions_enabled {
 			return Ok(());
 		}
 		// Do not turn a canceled utterance into fresh work by putting it back through raw chat ingress.

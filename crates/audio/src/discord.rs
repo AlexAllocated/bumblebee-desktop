@@ -419,6 +419,30 @@ impl DiscordRuntime {
 		let _ = self.manager.remove(GuildId::new(guild_id)).await;
 	}
 
+	pub async fn revalidate_participant(
+		&self,
+		session: &Arc<Session>,
+		user_id: &str,
+	) -> Result<Option<Vec<String>>> {
+		let (presence, revision) = session.participant_snapshot();
+		let Some(config) = presence else {
+			return Ok(None);
+		};
+		let member = GuildId::new(config.guild_id.parse()?)
+			.member(&self.http, UserId::new(user_id.parse()?))
+			.await
+			.context("Recheck Discord participant permissions")?;
+		let state = session.state.lock();
+		if !revision.matches(&state)
+			|| !state
+				.voice_state
+				.as_ref()
+				.is_some_and(|v| v.participants.contains_key(user_id))
+		{
+			return Ok(None);
+		}
+		Ok(Some(member.roles.iter().map(ToString::to_string).collect()))
+	}
 	pub async fn revalidate_listener(&self, session: &Arc<Session>, user_id: &str) -> Result<bool> {
 		let (presence, revision) = session.participant_snapshot();
 		let Some(config) = presence else {
@@ -710,6 +734,16 @@ impl EventHandler for DiscordClientHandler {
 		if message.author.bot || message.webhook_id.is_some() {
 			return;
 		}
+		let role_ids = message
+			.member
+			.as_ref()
+			.map(|m| m.roles.iter().map(ToString::to_string).collect())
+			.unwrap_or_default();
+		let moderator = message
+			.member
+			.as_ref()
+			.and_then(|m| m.permissions)
+			.is_some_and(|p| p.administrator() || p.manage_messages());
 		let event = crate::DiscordMessage {
 			id: message.id.get().to_string(),
 			guild_id: message
@@ -725,6 +759,8 @@ impl EventHandler for DiscordClientHandler {
 				.or(message.author.global_name)
 				.unwrap_or(message.author.name),
 			text: message.content,
+			role_ids,
+			moderator,
 		};
 		if self.chat.try_send(event).is_err() {
 			tracing::warn!("Discord chat queue full; message dropped");

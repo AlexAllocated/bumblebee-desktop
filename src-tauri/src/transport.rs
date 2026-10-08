@@ -102,30 +102,39 @@ async fn serve_socket(socket: WebSocket, state: Arc<OverlayTransport>, expected_
 	}
 	let (mut sender, mut receiver) = socket.split();
 	let store = state.store.clone();
-	let settings = tokio::task::spawn_blocking(move || {
-		store.get::<bumblebee_core::model::OverlaySettings>("overlay_settings")
+	let initial = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<OverlayEvent>> {
+		Ok(vec![
+			OverlayEvent::OverlaySettings {
+				settings: store.get("overlay_settings")?.unwrap_or_default(),
+			},
+			OverlayEvent::AudioSettings {
+				settings: store.settings()?.audio_mix(),
+			},
+		])
 	})
 	.await;
 	if token_changes.has_changed().unwrap_or(true) || state.shutdown.is_cancelled() {
 		return;
 	}
-	if let Ok(Ok(settings)) = settings {
-		let event = OverlayEvent::OverlaySettings {
-			settings: settings.unwrap_or_default(),
+	let Ok(Ok(initial)) = initial else {
+		return;
+	};
+	for event in initial {
+		let Ok(json) = serde_json::to_string(&event) else {
+			return;
 		};
-		if let Ok(json) = serde_json::to_string(&event) {
-			if !matches!(
-				tokio::time::timeout(
-					std::time::Duration::from_secs(2),
-					sender.send(Message::Text(json.into()))
-				)
-				.await,
-				Ok(Ok(()))
-			) {
-				return;
-			}
+		if !matches!(
+			tokio::time::timeout(
+				std::time::Duration::from_secs(2),
+				sender.send(Message::Text(json.into()))
+			)
+			.await,
+			Ok(Ok(()))
+		) {
+			return;
 		}
 	}
+
 	loop {
 		tokio::select! {
 			 _ = state.shutdown.cancelled() => break,
@@ -196,6 +205,7 @@ async fn asset(
 		|| path.starts_with("assets/")
 		|| path.starts_with("puppets/")
 		|| path.starts_with("models/")
+        || path.starts_with("audio/")
 	{
 		(state.assets)(&path)
 	} else {

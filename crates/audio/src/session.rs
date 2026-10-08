@@ -233,7 +233,7 @@ pub(crate) struct ParticipantRevision {
 	participants: u64,
 }
 impl ParticipantRevision {
-	fn matches(self, state: &SessionState) -> bool {
+	pub(crate) fn matches(self, state: &SessionState) -> bool {
 		self.presence == state.presence_revision && self.participants == state.participant_revision
 	}
 }
@@ -1398,6 +1398,33 @@ impl Session {
 		true
 	}
 
+	pub fn set_speech_gain(&self, gain: f32) -> Result<()> {
+		anyhow::ensure!(
+			gain.is_finite() && (0.0..=2.0).contains(&gain),
+			"Invalid speech gain"
+		);
+		if let Some(playback) = self.current_playback.lock().as_ref() {
+			if playback.playback_class == SongbirdPlaybackClass::Speech {
+				let _ = playback.handle.set_volume(gain);
+			}
+		}
+		Ok(())
+	}
+	pub fn set_cue_gain(&self, gain: f32) -> Result<()> {
+		anyhow::ensure!(
+			gain.is_finite() && (0.0..=2.0).contains(&gain),
+			"Invalid cue gain"
+		);
+		if let Some(playback) = self.current_playback.lock().as_ref() {
+			if matches!(
+				playback.playback_class,
+				SongbirdPlaybackClass::Cue | SongbirdPlaybackClass::Thinking
+			) {
+				let _ = playback.handle.set_volume(gain);
+			}
+		}
+		Ok(())
+	}
 	pub async fn interrupt_playback(&self) {
 		self.interruption_epoch.fetch_add(1, Ordering::SeqCst);
 		let current = self.current_playback.lock().clone();
