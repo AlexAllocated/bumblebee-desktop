@@ -1,0 +1,27 @@
+[package]
+name = "bumblebee-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dashmap = "6.1"
+libloading = "0.9"
+parking_lot = "0.12"
+# Bundle the same codec used by Songbird; do not require a system Opus install.
+libopus_sys = { version = "0.3.3", features = ["bundled", "static"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
+songbird = { path = "../../vendor/songbird", default-features = false, features = ["serenity", "gateway", "driver", "receive", "rustls", "tungstenite"] }
+
+[dev-dependencies]
+axum = "0.8"

@@ -1,0 +1,87 @@
+name: Desktop installers
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-installers-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev uuid-dev libsecret-1-dev libc++-dev libc++abi-dev cmake gnome-keyring xvfb dbus-x11
+      - name: Dependencies
+        run: bun install --frozen-lockfile
+      - name: Prepare bundled native libraries
+        run: python scripts/prepare-native-audio.py
+      - name: Bundle Linux native audio dependencies
+        if: runner.os == 'Linux'
+        run: python scripts/bundle-linux-native.py
+      - name: Collect packaged dependency notices
+        run: python scripts/collect-licenses.py
+      - name: Collect Linux runtime dependency notices
+        if: runner.os == 'Linux'
+        run: python scripts/collect-os-notices.py
+      - name: Check packaging safeguards
+        run: python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Check interface and rendering
+        run: |
+          bun run check
+          bun test src
+      - name: Check native behavior
+        run: cargo test --workspace --locked
+      - name: Build installers
+        run: bun tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Install and smoke-test Linux package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y ./target/${{ matrix.target }}/release/bundle/deb/*.deb
+          dbus-run-session -- xvfb-run -a bash scripts/linux-smoke-test.sh
+      - name: Install and smoke-test Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe).FullName
+          $installDir = Join-Path $env:RUNNER_TEMP 'BumblebeeInstalled'
+          $process = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$installDir" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          $smoke = Start-Process -FilePath "$installDir/bumblebee-desktop.exe" -ArgumentList '--smoke-test' -PassThru -Wait
+          if ($smoke.ExitCode -ne 0) { throw "Installed application smoke test failed: $($smoke.ExitCode)" }
+      - name: Collect artifacts and checksums
+        run: python scripts/collect-installers.py target/${{ matrix.target }}/release/bundle release-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bumblebee-${{ matrix.target }}-unsigned
+          path: release-artifacts/
+          if-no-files-found: error

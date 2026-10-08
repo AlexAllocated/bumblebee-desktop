@@ -1,0 +1,5 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main", "description": "Bumblebee desktop window only; OBS receives no IPC permissions.",
+  "windows": ["main"], "permissions": ["core:default", "opener:allow-open-url", "autostart:default"]
+}

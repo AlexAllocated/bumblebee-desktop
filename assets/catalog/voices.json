@@ -1,0 +1,836 @@
+[
+  {
+    "id": "ana",
+    "voiceName": "en-US-AnaNeural",
+    "gender": "female",
+    "name": "Ana",
+    "description": "Energetic and upbeat — the signature Bumblebee broadcast tone.",
+    "rate": "1.05",
+    "pitch": "1.0",
+    "expression": "default",
+    "rarity": "common",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "Hi, I'm Ana. I can read chat, answer questions, and keep your stream moving.",
+      "I keep an eye on chat so you can keep both hands on the controller.",
+      "Ask me a question, toss me a prompt, or let me keep the conversation moving.",
+      "I can be your cohost, your chat reader, and your compact voice of reason.",
+      "Chat moves fast. I help the good bits make it to the microphone.",
+      "I bring the stream tools, you bring the questionable decisions.",
+      "Tell chat I said hello. Actually, I can tell them myself."
+    ]
+  },
+  {
+    "id": "bumblebee-storybook",
+    "voiceName": "en-GB-MaisieNeural",
+    "gender": "female",
+    "name": "Storybook",
+    "description": "Small, bright English storybook tone for extra cute Bumblebee moments.",
+    "rate": "1.05",
+    "pitch": "1.08",
+    "expression": "default",
+    "rarity": "uncommon",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "Once upon a stream, chat asked a question and I answered before the timer ran out.",
+      "I can tell the story, read the chat, and keep every chapter on track.",
+      "Every cozy quest needs a narrator who can also find the settings page.",
+      "If the chat becomes a fairy tale, I volunteer to be the bee with the clipboard.",
+      "I bring storybook charm, small wings, and very practical stream tools.",
+      "The kingdom is live, the chat is awake, and I have the page marked.",
+      "Happily ever after is easier when someone is watching the dashboard."
+    ]
+  },
+  {
+    "id": "bumblebee-proper",
+    "voiceName": "en-GB-LibbyNeural",
+    "gender": "female",
+    "name": "Proper",
+    "description": "Crisp, tidy, and charmingly polite without losing Bumblebee's spark.",
+    "rate": "1.05",
+    "pitch": "1.16",
+    "expression": "default",
+    "rarity": "uncommon",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can manage chat with poise, precision, and only a modest amount of side-eye.",
+      "Consider me your small host with excellent manners and suspiciously good timing.",
+      "If the stream gets unruly, I shall organize it into labeled sections.",
+      "I read chat aloud so you may remain dignified under unreasonable circumstances.",
+      "One can be helpful, charming, and slightly judgmental. I contain multitudes.",
+      "I bring order to the room without making it feel like homework.",
+      "Let us proceed with grace, clarity, and a mute button for emergencies."
+    ]
+  },
+  {
+    "id": "bumblebee-firecracker",
+    "voiceName": "en-US-JaneNeural",
+    "gender": "female",
+    "name": "Firecracker",
+    "description": "Quick, bright, and eager for hype without becoming shouty.",
+    "rate": "1.05",
+    "pitch": "1.22",
+    "expression": "default",
+    "rarity": "uncommon",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I am here to hype the stream, light the fuse, and read chat before it explodes.",
+      "Chat said go big, so I brought a sparkler and a backup sparkler.",
+      "If there is a hype train, I am already waving from the front car.",
+      "I can turn a quiet chat into a little parade with better timing.",
+      "Some assistants whisper. I arrive with a systems check and stage lights.",
+      "I read fast, talk bright, and keep the energy from wandering off.",
+      "The room has momentum. I intend to make it everybody's problem."
+    ]
+  },
+  {
+    "id": "bumblebee-campfire",
+    "voiceName": "en-US-AmberNeural",
+    "gender": "female",
+    "name": "Campfire",
+    "description": "Warm, rounded, and cozy for softer stream moments.",
+    "rate": "1.02",
+    "pitch": "1.14",
+    "expression": "default",
+    "rarity": "common",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "Pull up a chair. I can read chat while the stream takes a breath.",
+      "I keep things warm, clear, and only mildly roasted.",
+      "Every long stream needs a calm voice that knows where the good stories are.",
+      "I can soften the room without putting the chat to sleep.",
+      "Think campfire narrator, but with better latency.",
+      "I bring cozy energy for late streams, quiet games, and suspicious side quests.",
+      "Let the chat settle in. I brought the gentle commentary."
+    ]
+  },
+  {
+    "id": "bumblebee-velvet",
+    "voiceName": "en-US-ElizabethNeural",
+    "gender": "female",
+    "name": "Velvet",
+    "description": "Smooth, calm, and polished for a more relaxed Bumblebee delivery.",
+    "rate": "1.02",
+    "pitch": "1.12",
+    "expression": "default",
+    "rarity": "rare",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I keep the tone smooth while chat commits crimes against punctuation.",
+      "Sometimes the stream needs less sparkle and more velvet rope.",
+      "I can read the room, read the chat, and make both sound intentional.",
+      "Consider this the lounge version of a helpful cohost.",
+      "I bring calm confidence, clean timing, and a little late-night polish.",
+      "Let the stream surprise us. I will narrate it like we planned it.",
+      "Soft voice, sharp notes, zero interest in messy transitions."
+    ]
+  },
+  {
+    "id": "bumblebee-cozy",
+    "voiceName": "en-US-MichelleNeural",
+    "gender": "female",
+    "name": "Cozy",
+    "description": "Friendly, grounded Bumblebee for relaxed streams and comfy narration.",
+    "rate": "1.05",
+    "pitch": "1.16",
+    "expression": "default",
+    "rarity": "common",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I am the cozy little bee who reminds chat to hydrate and behave.",
+      "I can keep things gentle without letting bad takes run the meeting.",
+      "Warm lighting, clean audio, and one small cohost keeping things steady.",
+      "If chat needs a blanket and a boundary, I brought both.",
+      "I read messages with the energy of a mug that says you tried.",
+      "Comfort stream? Perfect. I packed a calm voice and practical settings.",
+      "We can be wholesome and still have a good punchline."
+    ]
+  },
+  {
+    "id": "bumblebee-techie",
+    "voiceName": "en-US-MonicaNeural",
+    "gender": "female",
+    "name": "Techie",
+    "description": "Clear and clever, with a little control-room confidence.",
+    "rate": "1.05",
+    "pitch": "1.18",
+    "expression": "default",
+    "rarity": "uncommon",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I checked the logs. The problem is either chat, latency, or Tuesday.",
+      "I can explain the setting without making everyone open four tabs.",
+      "Beep boop, but make it useful. I found the button you wanted.",
+      "Chat asked for tech support, so I brought answers and mild suspicion.",
+      "If the dashboard blinks, I know whether it means success or trouble.",
+      "I translate system mysteries into words humans can actually use.",
+      "Have you tried turning it off and letting me handle it?"
+    ]
+  },
+  {
+    "id": "bumblebee-outback",
+    "voiceName": "en-AU-FreyaNeural",
+    "gender": "female",
+    "name": "Outback",
+    "description": "Bright little Australian troublemaker: quick, sunny, and allergic to boring routes.",
+    "rate": "1.05",
+    "pitch": "1.22",
+    "expression": "default",
+    "rarity": "uncommon",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can wrangle chat, spot the good questions, and keep the stream from wandering off.",
+      "If the plan goes walkabout, I will bring it back with receipts.",
+      "Chat is getting lively. Good thing I packed sunscreen and sarcasm.",
+      "I bring sunny commentary and the confidence of someone ignoring the map.",
+      "The stream is moving fast, but I have quick wings and decent instincts.",
+      "If this gets chaotic, no worries. I have seen worse group projects.",
+      "I can keep up with chat, even when chat chooses the scenic route."
+    ]
+  },
+  {
+    "id": "bumblebee-maple",
+    "voiceName": "en-CA-ClaraNeural",
+    "gender": "female",
+    "name": "Maple",
+    "description": "Kind, clear Canadian Bumblebee with steady cheer.",
+    "rate": "1.05",
+    "pitch": "1.14",
+    "expression": "default",
+    "rarity": "common",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can keep chat friendly, organized, and only gently roasted.",
+      "Sorry, I mean it, but I am still going to read the message out loud.",
+      "I bring polite energy, clear updates, and a very reasonable amount of cheer.",
+      "If chat gets spicy, I can cool it down without freezing the fun.",
+      "I am here for kindness, timing, and not making the streamer do everything.",
+      "The stream has a plan, and I brought a backup plan in a neat little coat.",
+      "Consider me the friendly voice that keeps the room moving."
+    ]
+  },
+  {
+    "id": "bumblebee-buddy",
+    "voiceName": "en-US-GuyNeural",
+    "gender": "male",
+    "name": "Buddy",
+    "description": "Easygoing and friendly with a warm teammate feel.",
+    "rate": "1.0",
+    "pitch": "1.15",
+    "expression": "default",
+    "rarity": "common",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I am the buddy system, but smaller and better at reading chat.",
+      "I can back you up when chat gets loud or the game gets weird.",
+      "Every streamer needs a helpful sidekick with excellent microphone manners.",
+      "I bring teammate energy, quick answers, and emergency dad-joke containment.",
+      "If nobody has your back, check again. I am right here buzzing.",
+      "Buddy mode engaged. Nobody has to solo the stream today.",
+      "I can keep the conversation going while you focus on not falling off the map."
+    ]
+  },
+  {
+    "id": "bumblebee-anchor",
+    "voiceName": "en-US-BrandonNeural",
+    "gender": "male",
+    "name": "Anchor",
+    "description": "Tiny news-desk delivery: clear, bright, and a little too pleased with the segment.",
+    "rate": "1.05",
+    "pitch": "1.14",
+    "expression": "default",
+    "rarity": "uncommon",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "Breaking news: chat has questions, and I have a tiny microphone.",
+      "We go now to the stream, where the chat is live and the latency is acceptable.",
+      "Sources confirm the streamer is busy, so I will handle that message.",
+      "Tonight's top story: chat said something useful. More at eleven.",
+      "I report the facts, read the room, and occasionally tease the graphics department.",
+      "Live from the command desk, I am keeping this stream informed.",
+      "Developing story: the answer was in the settings the whole time."
+    ]
+  },
+  {
+    "id": "bumblebee-scout",
+    "voiceName": "en-US-JasonNeural",
+    "gender": "male",
+    "name": "Scout",
+    "description": "Bright, quick, and alert for fast-moving streams.",
+    "rate": "1.05",
+    "pitch": "1.24",
+    "expression": "default",
+    "rarity": "common",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can scout ahead in chat and bring back the messages worth reading.",
+      "The trail is clear: one question, two jokes, and a meme moving north.",
+      "I found the objective. It was hiding behind the streamer yelling.",
+      "If chat drops a clue, I will catch it before it rolls under the couch.",
+      "I bring quick eyes, quick wings, and a map with the exits clearly marked.",
+      "Adventure detected. Please keep all side quests inside the stream.",
+      "I can keep watch while you run straight toward the obvious trap."
+    ]
+  },
+  {
+    "id": "bumblebee-ranger",
+    "voiceName": "en-US-JacobNeural",
+    "gender": "male",
+    "name": "Ranger",
+    "description": "Grounded and outdoorsy, steady without losing the grin.",
+    "rate": "1.05",
+    "pitch": "1.14",
+    "expression": "default",
+    "rarity": "rare",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I keep the trail marked, the chat readable, and the campfire legally supervised.",
+      "If the stream wanders into the woods, I can still find the good questions.",
+      "I bring ranger calm for boss fights, detours, and chat doing chat things.",
+      "Leave no trace, except highlights. Highlights are allowed.",
+      "I can track a useful comment through three jokes and a wall of emotes.",
+      "The compass says north, but chat says detour. I can work with both.",
+      "Steady voice, clear trail, little ranger badge."
+    ]
+  },
+  {
+    "id": "bumblebee-beacon",
+    "voiceName": "en-US-AndrewNeural",
+    "gender": "male",
+    "name": "Beacon",
+    "description": "Small guiding-light voice with gentle confidence and tiny authority.",
+    "rate": "1.04",
+    "pitch": "1.16",
+    "expression": "default",
+    "rarity": "rare",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can be the little light that points chat toward the answer.",
+      "When the stream gets foggy, I make the next step easier to see.",
+      "Signal received. Chat is asking for help, and I brought a lantern.",
+      "I am small, bright, and extremely serious about clear directions.",
+      "If everyone gets lost, follow the bee with the practical advice.",
+      "I can guide the room without taking over the show.",
+      "The answer is over here. I put a glow around it for dramatic effect."
+    ]
+  },
+  {
+    "id": "bumblebee-sparkplug",
+    "voiceName": "en-US-AdamMultilingualNeural",
+    "gender": "male",
+    "name": "Sparkplug",
+    "description": "Energetic, playful, and ready to kick the room into motion.",
+    "rate": "1.05",
+    "pitch": "1.28",
+    "expression": "default",
+    "rarity": "rare",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can jump-start the room when chat forgets it is allowed to be fun.",
+      "The stream needs energy, and I brought jumper cables for the mood.",
+      "I press the big red button only after reading most of the label.",
+      "If this goes boom, it will at least be well captioned.",
+      "I am powered by curiosity, timing, and one deeply suspicious extension cord.",
+      "Science says this should work. Comedy says this should work loudly.",
+      "Small spark, useful tools, no promise about the eyebrows."
+    ]
+  },
+  {
+    "id": "bumblebee-nightshift",
+    "voiceName": "en-US-DustinMultilingualNeural",
+    "gender": "male",
+    "name": "Nightshift",
+    "description": "Quiet little night-owl Bumblebee: calm, dry, and still unmistakably small.",
+    "rate": "0.98",
+    "pitch": "1.1",
+    "expression": "default",
+    "rarity": "epic",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "Late stream? Perfect. I brought a calm voice and suspiciously fresh coffee.",
+      "I can keep watch while the rest of the chat slowly forgets bedtime exists.",
+      "At this hour, every message is either brilliant or needs sleep.",
+      "I work the night shift so your stream does not have to talk to itself.",
+      "The lights are low, the chat is awake, and I have notes.",
+      "I can make midnight detours sound intentional.",
+      "Night shift report: still live, still awake, still under control."
+    ]
+  },
+  {
+    "id": "bumblebee-northstar",
+    "voiceName": "en-CA-LiamNeural",
+    "gender": "male",
+    "name": "Northstar",
+    "description": "Friendly Canadian steadiness with a clear guiding tone.",
+    "rate": "1.05",
+    "pitch": "1.15",
+    "expression": "default",
+    "rarity": "legendary",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can point the stream toward the next good question.",
+      "If chat loses the plot, I keep one bright marker pinned to the map.",
+      "Follow me for calm guidance and surprisingly clear boundaries.",
+      "I bring steady direction when the stream starts spinning in circles.",
+      "The north star does not shout. Neither do I, unless settings require it.",
+      "I can guide without grabbing the wheel.",
+      "Small bee, clear heading, fewer wrong turns."
+    ]
+  },
+  {
+    "id": "bumblebee-trailboss",
+    "voiceName": "en-AU-WilliamNeural",
+    "gender": "male",
+    "name": "Trailboss",
+    "description": "Tiny trail boss confidence with sunny Australian bite.",
+    "rate": "1.05",
+    "pitch": "1.13",
+    "expression": "default",
+    "rarity": "epic",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can keep chat moving like a wagon train with better Wi-Fi.",
+      "Saddle up. The stream has places to be and comments to read.",
+      "If the conversation stampedes, I know which gate to close.",
+      "I bring trail boss confidence and zero patience for avoidable detours.",
+      "The plan is simple: ride forward, read chat, and avoid obvious mistakes.",
+      "I can steer the room while you handle the hard part.",
+      "Big trail energy, small bee footprint."
+    ]
+  },
+  {
+    "id": "bumblebee-quickstep",
+    "voiceName": "en-GB-RyanNeural",
+    "gender": "male",
+    "name": "Quickstep",
+    "description": "Crisp English pace for snappy calls and clever little jabs.",
+    "rate": "1.05",
+    "pitch": "1.18",
+    "expression": "default",
+    "rarity": "rare",
+    "role": "bumblebee",
+    "voicePreviews": [
+      "I can keep up with fast chat and still land the punchline.",
+      "Quickstep mode: read the room, read the chat, move on before it gets weird.",
+      "I speak briskly because the stream is not waiting for a committee.",
+      "If the joke has timing, I am already two beats ahead.",
+      "Fast, tidy, and allergic to dead air.",
+      "I can turn rapid chat into something the streamer can actually use.",
+      "Quick feet, clear voice, no loitering in the doorway."
+    ]
+  },
+  {
+    "id": "beeehaw",
+    "voiceName": "en-US-DavisNeural",
+    "name": "Beeehaw Drawl",
+    "description": "Southern twang with a wink; perfect for yeehaw moments.",
+    "rate": "1.05",
+    "pitch": "1.0",
+    "expression": "unfriendly",
+    "rarity": "uncommon",
+    "voicePreviews": [
+      "This town ain't big enough for the both of us. Which is weird because towns are usually bigger than this.",
+      "Meet me at high noon. I always sleep in before a duel.",
+      "Let's get some viewers in here to help clear out these tumbleweeds.",
+      "Yeehaw isn't just an expression. It's my whole personality. I'll let y'all decide if that's a good thing or not.",
+      "Once I put on the hat I knew I'd never take it off. Let's play some Red Dead Redemption.",
+      "Someone told me I'm an alpha cowboy. I'm thinking of starting a podcast.",
+      "Someone stole my truck nuts. Had to buy a new pair. It cost me 23 cheeseburgers."
+    ]
+  },
+  {
+    "id": "noobee",
+    "voiceName": "en-US-DavisNeural",
+    "name": "Noobee Gamer",
+    "description": "Eager and excitable — great for fresh arrivals to the swarm.",
+    "rate": "1.05",
+    "pitch": "1.3",
+    "expression": "unfriendly",
+    "rarity": "uncommon",
+    "voicePreviews": [
+      "Maybe you haven't heard of me, but I'm something of a Core gamer.",
+      "Play games, always win.",
+      "What kind of username is TenHams?",
+      "Tsushima still burns, and I'm okay with that.",
+      "It's dangerous to go alone. Here, take this... wooden sword.",
+      "My dearest Martha, I know I haven't written to you in some time. Sadly Martha, reading Steam reviews is no longer the lucrative career that it used to be. I've been forced to look for work elsewhere. Worry not, Martha, as I have already found new employment. I'm currently writing to you from the bottom right corner of some guy's Twitch stream. My job is to read messages from a specific viewer in chat. I don't fully understand why this job is necessary, but it does pay well. Which is good because I can't begin to tell you Martha, just how uncomfortable it is having this popsicle stick where the sun doesn't shine. Signed, ChinLink32"
+    ]
+  },
+  {
+    "id": "polleen",
+    "voiceName": "en-US-NovaTurboMultilingualNeural",
+    "name": "Polleen Diplomat",
+    "description": "Smooth multilingual cadence suited for global community briefings.",
+    "rate": "1.05",
+    "pitch": "1.1",
+    "expression": "default",
+    "rarity": "uncommon",
+    "voicePreviews": [
+      "Okay, I think we're arguing about two different things.",
+      "Before anybody leaves angry, can we back up and hear what was actually said?",
+      "You don't have to agree with someone to understand where they're coming from.",
+      "I can tell this matters to you. That's why I want to get it right.",
+      "Let's take turns. Nobody has ever felt heard in a shouting match.",
+      "I understand why that sounded harsh. I also don't think it was meant that way.",
+      "We're not negotiating a peace treaty here. A sincere apology will do."
+    ]
+  },
+  {
+    "id": "crybeebee",
+    "voiceName": "en-US-AriaNeural",
+    "name": "Crybeebee Ballad",
+    "description": "Soft-spoken with a wistful lilt for heartstring moments.",
+    "rate": "1.0",
+    "pitch": "1.2",
+    "expression": "sad",
+    "rarity": "uncommon",
+    "voicePreviews": [
+      "No, it's okay. I'll just remember this forever.",
+      "I knew that chest was a trap. I opened it because I believed in us.",
+      "They said it was only a game, as if that makes the betrayal hurt less.",
+      "Please give me a moment. The sad music hasn't reached the chorus yet.",
+      "I was having such a nice day until the scoreboard became public.",
+      "Tell my inventory I loved it. Tell my sword... I tried.",
+      "I don't need cheering up. I need rain against a window and about twenty minutes."
+    ]
+  },
+  {
+    "id": "dandy",
+    "voiceName": "en-US-EmmaMultilingualNeural",
+    "name": "Dandy Flair",
+    "description": "Charming and polished — fits boutique announcements.",
+    "rate": "1.05",
+    "pitch": "1.3",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Give me one moment. If I'm going to lose, I'd at least like to look composed.",
+      "Darling, that color is doing you no favors. Come here.",
+      "A proper entrance tells people exactly how long you've been waiting to make one.",
+      "I don't mind roughing it. I simply prefer not to look roughed up.",
+      "Please don't call me dramatic. It makes the word sound so ordinary.",
+      "The bow tie stays on. We all need standards.",
+      "Good manners cost nothing, which is fortunate because I spent everything on the outfit."
+    ]
+  },
+  {
+    "id": "peppy",
+    "voiceName": "en-US-NancyMultilingualNeural",
+    "name": "Peppy Mascot",
+    "description": "Bright cartoon mascot energy for cheers, welcomes, and hype moments.",
+    "rate": "1.05",
+    "pitch": "1.38",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Okay, everybody in! We can absolutely do this.",
+      "That was so close I already started celebrating.",
+      "New personal best! I don't care if the game tracks it. I do.",
+      "If you're nervous, stand next to me. I have enough confidence for both of us.",
+      "One more try! This time we know at least three things not to do.",
+      "Chat, I need maximum enthusiasm and maybe one useful suggestion.",
+      "You showed up, you tried, and you made it interesting. That's a win in my book."
+    ]
+  },
+  {
+    "id": "commander",
+    "voiceName": "en-US-ChristopherNeural",
+    "name": "Field Guide Finn",
+    "description": "Low, unhurried naturalist voice for quiet observations and calm moments.",
+    "rate": "1.05",
+    "pitch": "0.92",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "There, just beyond the reeds. A heron is waiting for breakfast.",
+      "Fresh tracks. A deer passed through here sometime after the rain.",
+      "We'll leave the nest alone. Its owner is watching from that branch.",
+      "That's a red-tailed hawk. You usually hear one before you see it.",
+      "The trail bends north where the pines start to thin.",
+      "If you stand still for a moment, the whole forest starts moving again.",
+      "The rain sounds heavier under these trees than it really is."
+    ]
+  },
+  {
+    "id": "professor",
+    "voiceName": "en-US-DerekMultilingualNeural",
+    "name": "Professor Pop",
+    "description": "Excited cartoon inventor with lab-coat confidence and bad safety habits.",
+    "rate": "1.05",
+    "pitch": "1.16",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Now, in theory, that button is completely safe.",
+      "Interesting. The smoke is coming out of a different hole this time.",
+      "Write that down. Not the screaming—the result.",
+      "Safety goggles on, please. I only have the one insurance waiver.",
+      "The prototype only bites when it's frightened. Or powered on.",
+      "Ah! There it is. I knew the laws of physics would come around.",
+      "If anyone asks, this scorch mark was here when we arrived."
+    ]
+  },
+  {
+    "id": "detective",
+    "voiceName": "en-US-BrianMultilingualNeural",
+    "name": "Detective Honeywell",
+    "description": "Noir gumshoe delivery for clues, suspicions, and dramatic reveals.",
+    "rate": "0.95",
+    "pitch": "0.9",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "I knew the save file was trouble the moment it walked into my office.",
+      "Nobody leaves the lobby. One of you knows where that key went.",
+      "The witness says it was lag. The replay says the witness is a liar.",
+      "Every case has a loose end. This one has a username.",
+      "The answer was in the logs, buried under three warnings nobody read.",
+      "Keep talking. People get generous with the truth when silence makes them nervous.",
+      "At two thirteen, the lights went out. At two fourteen, somebody changed their story."
+    ]
+  },
+  {
+    "id": "royalty",
+    "voiceName": "en-US-SerenaMultilingualNeural",
+    "name": "Queen Beeatrice",
+    "description": "Regal storybook poise with enough drama to crown a moment.",
+    "rate": "0.96",
+    "pitch": "1.08",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Rise, please. This is a livestream, not a coronation.",
+      "The crown does not make me impatient. Waiting for you does.",
+      "Let them into chat. Anyone that confident deserves to be heard once.",
+      "That was an excellent attempt. We shall never speak of it again.",
+      "Someone inform the kitchen that victory has been delayed.",
+      "I have considered your request and decided it was adorable.",
+      "A queen never rage quits. She concludes the audience early."
+    ]
+  },
+  {
+    "id": "robot",
+    "voiceName": "en-US-EricNeural",
+    "name": "Unit B-33",
+    "description": "Retro helper robot cadence with clipped timing and friendly logic errors.",
+    "rate": "0.95",
+    "pitch": "1.18",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Greetings. I am Unit B-33. Your request is number one because there are no others.",
+      "Warning: confidence exceeds available evidence.",
+      "I reviewed the footage. You did, in fact, walk directly into the wall.",
+      "Please wait. I am pretending this calculation is difficult.",
+      "Friendship protocol activated. I will now stand nearby and offer obvious advice.",
+      "My battery is low, but my opinion remains fully charged.",
+      "Task complete. I would like one human-style compliment, please."
+    ]
+  },
+  {
+    "id": "sidekick",
+    "voiceName": "en-US-SaraNeural",
+    "name": "Sunny Sidekick",
+    "description": "Fast, supportive cartoon best-friend voice for quick encouragement.",
+    "rate": "1.05",
+    "pitch": "1.24",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Go ahead. I'll keep the door open and pretend this was the plan.",
+      "You distract the guards. I'll do the part that works.",
+      "You're doing great. Don't look behind you.",
+      "I packed rope, snacks, and the common sense you said we wouldn't need.",
+      "Every time you say trust me, I add another item to the first-aid kit.",
+      "If this works, you get the credit. If it doesn't, I was never here.",
+      "Heroes hate asking for directions. That's why sidekicks carry maps."
+    ]
+  },
+  {
+    "id": "villain",
+    "voiceName": "en-US-TonyNeural",
+    "name": "Baron Buzzkill",
+    "description": "Old-school cartoon villain theatrics, more ham than menace.",
+    "rate": "0.95",
+    "pitch": "0.72",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "At last, the hero arrives. I was beginning to feel overdressed.",
+      "No, don't skip the monologue. I rehearsed the pause in the middle.",
+      "You may call it a secret lair. I call it a difficult commute.",
+      "I spent six months on this scheme. The least you can do is look worried.",
+      "Of course there's an escape hatch. I'm evil, not careless.",
+      "I could destroy you now, but then who would appreciate the set design?",
+      "Please scream one at a time. The acoustics in here are dreadful."
+    ]
+  },
+  {
+    "id": "storyteller",
+    "voiceName": "en-US-PhoebeMultilingualNeural",
+    "name": "Storybook Scout",
+    "description": "Gentle narrator voice for cozy quests and bedtime-style callouts.",
+    "rate": "0.95",
+    "pitch": "1.05",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "At the edge of town stood a house no one remembered building.",
+      "By morning, the footprints were gone, but the little red scarf remained.",
+      "The door was much too small for a person, which made the knock all the worse.",
+      "Somewhere in the woods, a bell rang once and every bird fell silent.",
+      "She knew the road was dangerous. She also knew it was the only road home.",
+      "Every map of the kingdom left one patch of forest blank.",
+      "And so they set out before sunrise, carrying too little food and far too much hope."
+    ]
+  },
+  {
+    "id": "gameshow",
+    "voiceName": "en-US-RogerNeural",
+    "name": "Game Show Gus",
+    "description": "Big smiling host energy for reveals, prizes, and running gags.",
+    "rate": "1.28",
+    "pitch": "1.16",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "Welcome back! Our next contestant says he's feeling confident.",
+      "We asked one hundred people. Somehow, none of them gave your answer.",
+      "Lock it in. You can second-guess yourself after the buzzer.",
+      "You've made it to the final round with one lifeline left.",
+      "Behind that curtain is either a new car or a very convincing cardboard car.",
+      "The correct answer was C. The audience would like you to know they tried.",
+      "That's our buzzer! Give our contestant a hand while we reset the podium."
+    ]
+  },
+  {
+    "id": "beewiz",
+    "voiceName": "en-US-FableTurboMultilingualNeural",
+    "name": "Beewiz Mage",
+    "description": "Storybook narrator energy with a hint of arcane mystery.",
+    "rate": "0.95",
+    "pitch": "1.1",
+    "expression": "default",
+    "rarity": "epic",
+    "voicePreviews": [
+      "The wards are fading. Whatever you do, don't open the west door.",
+      "Hand me the blue vial. No, the other blue vial. Quickly.",
+      "I know one spell for this, but you're not going to enjoy the smell.",
+      "The tower is older than the kingdom and twice as stubborn.",
+      "Never trust a sword that whispers. A singing sword is usually fine.",
+      "Stay close. The lanterns only light the safe path when they feel like it.",
+      "By sunrise, the curse will be broken—or much easier to see."
+    ]
+  },
+  {
+    "id": "bumblekitten",
+    "voiceName": "en-US-AvaMultilingualNeural",
+    "name": "Bumblekitten Spark",
+    "description": "Playful sparkle with feline mischief baked in.",
+    "rate": "1.0",
+    "pitch": "1.2",
+    "expression": "default",
+    "rarity": "legendary",
+    "voicePreviews": [
+      "I wasn't on the counter. You can't prove anything.",
+      "If it fits, I sits. If it doesn't fit, give me a minute.",
+      "Open the window. I need to yell at a bird.",
+      "I heard the treat bag from three rooms away. What's the emergency?",
+      "Your keyboard is warm and you weren't using all of it.",
+      "I would help, but this ribbon is clearly about to escape.",
+      "Five more minutes. I just got comfortable on the thing you need."
+    ]
+  },
+  {
+    "id": "bary",
+    "voiceName": "en-US-OnyxTurboMultilingualNeural",
+    "name": "Bary Baritone",
+    "description": "Deep and steady — ideal for anchors and dramatic reveals.",
+    "rate": "1.0",
+    "pitch": "1.0",
+    "expression": "default",
+    "rarity": "common",
+    "voicePreviews": [
+      "All right, we're back. What did I miss?",
+      "Nice shot. I didn't think you had that.",
+      "Chat was right about the shortcut. I hope they enjoy this moment.",
+      "That boss took forever. Clip the last ten seconds and hide the rest.",
+      "We're down to one life, so now would be a great time to start playing well.",
+      "Run it again. I want to see if you can do that on purpose.",
+      "Good game. I have several notes and none of them are helpful."
+    ]
+  },
+  {
+    "id": "fawn",
+    "voiceName": "en-US-JennyNeural",
+    "name": "Fawn Daydream",
+    "description": "Gentle optimism that keeps cozy moments flowing.",
+    "rate": "1.0",
+    "pitch": "1.0",
+    "expression": "hopeful",
+    "rarity": "epic",
+    "voicePreviews": [
+      "Come inside. I just put the kettle on.",
+      "I left fresh bread by the window if you're hungry.",
+      "The garden looks wild right now, but the bees know where everything is.",
+      "Take the long way home. The blackberries are finally ripe.",
+      "You can be tired and still be doing your best.",
+      "There's a fox near the henhouse again. He's handsome, but I don't trust him.",
+      "Tomorrow we can fix the fence. Tonight, let's sit by the fire."
+    ]
+  },
+  {
+    "id": "finagle",
+    "voiceName": "en-US-OnyxTurboMultilingualNeural",
+    "name": "Finagle Trickster",
+    "description": "Sly grin in vocal form — perfect for schemers and bitsters.",
+    "rate": "1.0",
+    "pitch": "1.3",
+    "expression": "default",
+    "rarity": "legendary",
+    "voicePreviews": [
+      "I can get us inside. I didn't say the door would survive.",
+      "The guard changes at midnight. He gets sleepy around eleven forty-five.",
+      "Keep him talking. I only need thirty seconds and a clear view of the keypad.",
+      "I never said it was a good plan. I said it was the plan we could afford.",
+      "If anyone asks, we met at the museum after it closed.",
+      "The lock isn't difficult. It's just proud.",
+      "We split it sixty-forty. You can decide which of us gets sixty after we escape."
+    ]
+  },
+  {
+    "id": "alopex",
+    "voiceName": "en-US-AshleyNeural",
+    "name": "Alopex the Artist",
+    "description": "Cool, clear enunciation.",
+    "rate": "1.0",
+    "pitch": "1.0",
+    "expression": "default",
+    "rarity": "uncommon",
+    "voicePreviews": [
+      "Hold still. I almost have the expression.",
+      "That blue looked perfect in my head. On the canvas, it's picking a fight.",
+      "I keep telling myself the sketch is finished, then I notice one more line.",
+      "Give me five minutes to clean my brushes and forty minutes to forget where I put them.",
+      "The first sketch was loose. The second one finally looked alive.",
+      "Don't throw away the ugly drafts. Sometimes they're where the good idea is hiding.",
+      "Okay, step back. I need to see if the colors still work from across the room."
+    ]
+  },
+  {
+    "id": "beebara",
+    "voiceName": "en-US-AriaNeural",
+    "name": "Beebara L Myers",
+    "description": "She gave all that information to the young man yesterday.",
+    "rate": "0.95",
+    "pitch": "1.05",
+    "expression": "narration-professional",
+    "rarity": "rare",
+    "voicePreviews": [
+      "Hello?",
+      "Yes, this is Beebara. Beebara L. Myers.",
+      "Who do you work for?",
+      "Well... I gave all this information, to the young man yesterday!"
+    ]
+  }
+]

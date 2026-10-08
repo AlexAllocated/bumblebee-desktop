@@ -1,0 +1,74 @@
+[
+  {
+    "id": "beeehaw",
+    "name": "Beeehaw",
+    "description": "Cowpoke swagger ready to lasso any chat chaos.",
+    "defaultVoiceId": "beeehaw"
+  },
+  {
+    "id": "noobee",
+    "name": "Noobee",
+    "description": "Chats in all the hive streams.",
+    "defaultVoiceId": "noobee"
+  },
+  {
+    "id": "polleen",
+    "name": "Polleen",
+    "description": "An empathetic diplomat.",
+    "defaultVoiceId": "polleen"
+  },
+  {
+    "id": "crybeebee",
+    "name": "Crybeebee",
+    "description": "Moody melody maker.",
+    "defaultVoiceId": "crybeebee"
+  },
+  {
+    "id": "beewiz",
+    "name": "Beewiz",
+    "description": "Arcane honey mage whose staff grows brighter with hype.",
+    "defaultVoiceId": "beewiz"
+  },
+  {
+    "id": "dandy",
+    "name": "Dandy",
+    "description": "Boutique bee with impeccable manners and dramatic bows.",
+    "defaultVoiceId": "dandy"
+  },
+  {
+    "id": "beebara",
+    "name": "Beebara L Myers",
+    "description": "She already gave all that information to the young man yesterday.",
+    "defaultVoiceId": "dandy"
+  },
+  {
+    "id": "bumblekitten",
+    "name": "Bumblekitten",
+    "description": "Feline trickster who pushes things off the counter.",
+    "defaultVoiceId": "bumblekitten"
+  },
+  {
+    "id": "fawn",
+    "name": "Fawn",
+    "description": "Cottage-core caretaker.",
+    "defaultVoiceId": "fawn"
+  },
+  {
+    "id": "finagle",
+    "name": "Finagle",
+    "description": "Heist-minded rogue with sly one-liners.",
+    "defaultVoiceId": "finagle"
+  },
+  {
+    "id": "alopex",
+    "name": "Alopex",
+    "description": "Artistic fox painter.",
+    "defaultVoiceId": "alopex"
+  },
+  {
+    "id": "wifebee",
+    "name": "Wifebee",
+    "description": "Queen of co-op chaos and the heart of the hive homefront.",
+    "defaultVoiceId": "bumblekitten"
+  }
+]

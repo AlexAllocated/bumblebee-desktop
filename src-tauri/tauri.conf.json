@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bumblebee",
+  "version": "0.1.0",
+  "identifier": "buzz.bumblebee.desktop",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Bumblebee",
+        "width": 1180,
+        "height": 800,
+        "minWidth": 850,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost http://127.0.0.1:* data: blob:; media-src 'self' http://127.0.0.1:* blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*; worker-src 'self' blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "nsis"],
+    "resources": {
+      "resources/native/": "native/",
+      "resources/keyword_models/": "keyword_models/",
+      "resources/native-manifest.json": "native-manifest.json",
+      "resources/third-party-licenses.txt": "licenses/third-party-licenses.txt",
+      "../LICENSE": "licenses/LICENSE",
+      "../ASSETS.md": "licenses/ASSETS.md",
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "../vendor/songbird/LICENSE.md": "licenses/songbird-LICENSE.md"
+    },
+    "shortDescription": "Your streaming companion, at home on your desktop.",
+    "category": "Entertainment",
+    "icon": ["icons/128x128.png", "icons/icon.ico"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "libsecret-1-0",
+          "libc++1",
+          "libc++abi1",
+          "libasound2t64",
+          "libssl3t64",
+          "libuuid1"
+        ]
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
+  }
+}
