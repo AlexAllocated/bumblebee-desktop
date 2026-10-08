@@ -65,6 +65,33 @@ impl NativeResources {
 			let _: libloading::Symbol<'_, unsafe extern "C" fn()> =
 				unsafe { vad.get(symbol) }.context("TEN VAD library is incompatible")?;
 		}
+		// Exercise delayed SDK dependencies as well as the loader. Both engines
+		// consume synthetic silence; no microphone, playback device, credentials,
+		// or provider connection is involved.
+		let mut detector =
+			crate::native::vad::VoiceActivityDetector::new().context("initialize packaged TEN VAD")?;
+		let silence = [0_u8; 6400];
+		let activity = detector.process_frame(&silence)?;
+		anyhow::ensure!(
+			!activity.vad_active && activity.rms == 0.0,
+			"packaged TEN VAD did not recognize synthetic silence"
+		);
+		detector.close().context("close packaged TEN VAD")?;
+		let mut keyword = crate::native::azure_speech::KeywordRecognizer::new(
+			&self
+				.keyword_models
+				.join("default/hey_bumblebee_default.table"),
+		)
+		.context("initialize packaged Speech keyword model")?;
+		keyword.write(&silence)?;
+		let result = keyword.poll(100)?;
+		anyhow::ensure!(
+			result.status == crate::native::azure_speech::KeywordPollStatus::Timeout,
+			"packaged Speech keyword recognition ended unexpectedly while processing silence"
+		);
+		keyword
+			.close()
+			.context("close packaged Speech keyword model")?;
 		Ok(())
 	}
 
@@ -81,6 +108,19 @@ impl NativeResources {
 			}
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	#[ignore = "requires prepared packaged native resources"]
+	fn installed_probe_exercises_silent_native_lifecycles() {
+		super::NativeResources::from_bundle(
+			std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources"),
+		)
+		.probe()
+		.unwrap();
 	}
 }
 pub(crate) fn configured() -> Result<&'static NativeResources> {

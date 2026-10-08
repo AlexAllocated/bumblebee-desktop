@@ -44,6 +44,6 @@ Use the actual release asset filename. This example does not claim that the rele
 
 The Windows CI smoke runs from an empty temporary working directory with a PATH containing only standard Windows directories, so it cannot find native resources through the checkout or development-tool paths. Its installer and application processes have bounded timeouts, and application output is captured in the job log. The hosted Windows runner still has development tools and system runtimes installed; this is installed-package evidence, not a pristine Windows-machine acceptance claim.
 
-Install an upgrade over the existing version and verify settings, profiles, memories, reminders and approved images remain available. Data lives in the OS application-data directory (`buzz.bumblebee.desktop`); secrets live in the OS keyring. Uninstalling or upgrading the executable must not migrate credentials into plain files.
+Install an upgrade over the existing version and verify settings, profiles, memories, reminders and approved images remain available. Data lives in the OS application-data directory (`buzz.bumblebee.desktop`); secrets live in the OS keyring. The Windows installer preserves application data during updates. Its interactive uninstaller offers an unchecked **Delete app data** option; selecting it intentionally removes local settings and content. Uninstalling or upgrading the executable must not migrate credentials into plain files.
 
 Check `docs/verification.md` for the actual tested boundaries before calling a build a release candidate.

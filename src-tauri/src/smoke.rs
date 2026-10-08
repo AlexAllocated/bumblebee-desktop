@@ -67,7 +67,15 @@ pub async fn run(state: Arc<Runtime>) -> Result<()> {
 			Ok(())
 		})
 		.await??;
-		bumblebee_audio::NativeResources::from_bundle(&state.engine.paths.native_dir).probe()?;
+		let native = bumblebee_audio::NativeResources::from_bundle(&state.engine.paths.native_dir);
+		// Native SDK startup/teardown can block. Keep the UI and timeout running;
+		// the enclosing installed-process timeout also covers an unresponsive FFI.
+		tokio::time::timeout(
+			Duration::from_secs(30),
+			tokio::task::spawn_blocking(move || native.probe()),
+		)
+		.await
+		.context("Installed native speech/VAD lifecycle exceeded 30 seconds")???;
 		let http = reqwest::Client::builder()
 			.no_proxy()
 			.timeout(Duration::from_secs(5))
