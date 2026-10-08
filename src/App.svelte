@@ -36,6 +36,16 @@
         error: error == null ? null : String(error),
       });
   }
+  async function rendererReady(verify: () => Promise<void>) {
+    if (!isTauri() || !(await invoke<boolean>("frontend_probe_required")))
+      return;
+    try {
+      await verify();
+      rendererResult();
+    } catch (error) {
+      rendererResult(error);
+    }
+  }
   const subscribe = (callback: (event: OverlayEvent) => void) => {
     subscribers.add(callback);
     if (snapshot)
@@ -350,7 +360,7 @@
                 {assetBase}
                 {subscribe}
                 muted={previewMuted}
-                onReady={() => rendererResult()}
+                onReady={rendererReady}
                 onError={rendererResult}
               />{/key}{:else}<div class="unavailable">
               <img src="./bumblebee.png" alt="Bumblebee" />

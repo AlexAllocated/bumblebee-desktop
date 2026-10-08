@@ -230,6 +230,7 @@ fn main() {
 		.plugin(tauri_plugin_opener::init())
 		.plugin(tauri_plugin_autostart::Builder::new().build())
 		.invoke_handler(tauri::generate_handler![
+			smoke::frontend_probe_required,
 			smoke::frontend_result,
 			commands::get_snapshot,
 			commands::save_overlay_settings,

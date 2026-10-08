@@ -2,6 +2,9 @@
 set -euo pipefail
 # CI creates an isolated, empty keyring. Never run this against an existing user's keyring.
 test -n "${RUNNER_TEMP:-}" || { echo 'This helper is for isolated CI runners.' >&2; exit 1; }
+# Xvfb has no DRI3/DMABUF compositor. Keep these virtual-display settings out of the application.
+export LIBGL_ALWAYS_SOFTWARE=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
 smoke_root=$(mktemp -d "$RUNNER_TEMP/bumblebee-smoke.XXXXXXXX")
 export XDG_DATA_HOME="$smoke_root/data"
 export XDG_CONFIG_HOME="$smoke_root/config"

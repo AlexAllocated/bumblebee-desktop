@@ -325,6 +325,34 @@ export function createStage(
   }
   return {
     ready,
+    async verifyRenderedFrame() {
+      await ready;
+      if (disposed)
+        throw new Error("Renderer was disposed before verification");
+      const engine = scene.getEngine();
+      // Read immediately after drawing: the normal canvas need not preserve its drawing buffer.
+      scene.render();
+      const pixels = await engine.readPixels(
+        0,
+        0,
+        engine.getRenderWidth(),
+        engine.getRenderHeight(),
+      );
+      const bytes = new Uint8Array(
+        pixels.buffer,
+        pixels.byteOffset,
+        pixels.byteLength,
+      );
+      let visible = 0;
+      for (let index = 3; index < bytes.length; index += 4)
+        if (bytes[index] > 0) visible++;
+      if (visible < 20)
+        throw new Error("The bee canvas rendered no visible model pixels");
+      // Give the native compositor a chance to present the frame before the smoke process exits.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+    },
     async consume(event: OverlayEvent) {
       if (disposed) return;
       if (event.type === "overlay_settings") {

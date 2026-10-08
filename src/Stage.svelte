@@ -12,14 +12,16 @@
     assetBase: string;
     muted?: boolean;
     subscribe: (callback: (event: OverlayEvent) => void) => () => void;
-    onReady?: () => void;
+    onReady?: (verify: () => Promise<void>) => void;
     onError?: (error: unknown) => void;
   } = $props();
   let element: HTMLDivElement;
   let stage: ReturnType<typeof createStage> | undefined;
   onMount(() => {
     stage = createStage(element, assetBase, muted);
-    void stage.ready.then(() => onReady?.()).catch((error) => onError?.(error));
+    void stage.ready
+      .then(() => onReady?.(stage!.verifyRenderedFrame))
+      .catch((error) => onError?.(error));
     const unsubscribe = subscribe((event) => {
       void stage?.consume(event);
     });

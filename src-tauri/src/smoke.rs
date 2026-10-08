@@ -7,6 +7,11 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 /// Only the trusted desktop window can acknowledge this. Ordinary runs have no smoke state.
 #[tauri::command]
+pub fn frontend_probe_required(state: tauri::State<'_, Arc<Runtime>>) -> bool {
+	state.smoke_frontend.is_some()
+}
+
+#[tauri::command]
 pub fn frontend_result(state: tauri::State<'_, Arc<Runtime>>, error: Option<String>) {
 	if let Some(frontend) = &state.smoke_frontend {
 		frontend.send_replace(Some(error.map_or(Ok(()), Err)));
@@ -168,6 +173,8 @@ pub async fn run(state: Arc<Runtime>) -> Result<()> {
 				.is_success(),
 			"Replacement overlay token did not work"
 		);
+		// Leave the verified frame on screen briefly so native compositor captures are meaningful.
+		tokio::time::sleep(Duration::from_millis(500)).await;
 		Ok(())
 	}
 	.await;
