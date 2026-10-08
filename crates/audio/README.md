@@ -46,7 +46,11 @@ for Windows and Linux x64 with checksums and the exact upstream license. Runtime
 Linux needs the SDK's system dependencies (glibc, libstdc++, libuuid, OpenSSL and
 ALSA). The AppImage must bundle non-system runtime dependencies; the Debian and
 Nix definitions supply them. Windows uses the SDK's x64 DLLs and the C++ runtime.
-Native manifests contain SHA-256 checksums of every packaged resource.
+`native-manifest.json` records SHA-256 digests of the prepared native resources
+before Tauri bundling. Its `stage` and `resources` fields identify that provenance.
+AppImage's linuxdeploy can subsequently rewrite ELF loader tags, including
+`RPATH` to `RUNPATH`; the prepared digests are not final installed-file digests.
+`SHA256SUMS.txt` verifies the actual downloadable installer bytes.
 
 `cargo test -p bumblebee-audio` runs hardware-independent tests. After preparing
 resources and the platform library path, explicitly run the ignored

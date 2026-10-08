@@ -26,7 +26,16 @@ def write_manifest(output: Path):
     manifest = {str(p.relative_to(output / folder if folder == "windows-runtime" else output)).replace("\\", "/"): hashlib.sha256(p.read_bytes()).hexdigest()
                 for folder in ("native", "keyword_models", "windows-runtime")
                 for p in sorted((output / folder).rglob("*")) if p.is_file()}
-    (output / "native-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    # AppImage's linuxdeploy can rewrite ELF search-path tags after this stage.
+    # Preserve input provenance without claiming these are final installer hashes.
+    document = {
+        "schemaVersion": 1,
+        "stage": "prepared-before-tauri-bundling",
+        "pathBase": "packaged resource directory (Windows CRT paths are installation-root relative)",
+        "note": "Tauri bundlers may rewrite ELF loader metadata. These are prepared-resource digests, not final installed-file digests. Verify released installers with SHA256SUMS.txt.",
+        "resources": manifest,
+    }
+    (output / "native-manifest.json").write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
     return manifest
 
 

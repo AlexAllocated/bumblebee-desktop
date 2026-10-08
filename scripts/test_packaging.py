@@ -109,7 +109,7 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unsatisfied"):
             notices.closure(packages, {"libwebkit"})
 
-    def test_manifest_tracks_exact_windows_root_and_native_resources(self):
+    def test_manifest_labels_prepared_windows_root_and_native_resource_digests(self):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder)
             for name in ("native/voice.so", "windows-runtime/msvcp140.dll", "keyword_models/wake.table"):
@@ -122,7 +122,11 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(len(second), 3)
             self.assertIn("msvcp140.dll", second)
             self.assertNotEqual(first["native/voice.so"], second["native/voice.so"])
-            self.assertEqual(json.loads((output / "native-manifest.json").read_text()), second)
+            document = json.loads((output / "native-manifest.json").read_text())
+            self.assertEqual(document["stage"], "prepared-before-tauri-bundling")
+            self.assertEqual(document["schemaVersion"], 1)
+            self.assertEqual(document["resources"], second)
+            self.assertIn("not final installed-file digests", document["note"])
 
     def test_missing_os_copyright_fails_instead_of_silent_notice_loss(self):
         with tempfile.TemporaryDirectory() as folder:
