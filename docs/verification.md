@@ -34,7 +34,7 @@ Observed locally on 2026-10-07:
 
 The optimized Linux build also produced a 160.48 MiB Debian package. Its extracted executable passed the smoke test using its packaged native resources and embedded renderer assets on NixOS. This local package links against Nix libraries and was tested in the pinned runtime environment; it is not an Ubuntu installer distribution artifact.
 
-This does not yet establish clean-machine installer acceptance, Windows behavior, live provider permissions, Discord audio, OBS capture, tray interaction, autostart, or upgrade preservation. The installer workflow includes installed-package smoke tests on Windows and Ubuntu; passing them must be verified before publishing a preview.
+This does not yet establish clean-machine installer acceptance, Windows behavior, live provider permissions, Discord audio, full provider-to-OBS synchronization, tray interaction, autostart, or upgrade preservation. The installer workflow includes installed-package smoke tests on Windows and Ubuntu; passing them must be verified before publishing a preview.
 
 ## Native release packaging
 
@@ -45,3 +45,11 @@ Seven packaging safeguard tests passed (including installed Visual Studio versio
 ## Installed interface rendering
 
 A fresh debug Debian package was built after the shared renderer readiness check was added. Its extracted executable passed the stricter smoke under Xvfb on NixOS: the packaged Svelte interface mounted, the real Bumblebee GLB loaded and Babylon completed a rendered frame before native, storage, asset and WebSocket checks completed. A subsequent check verified nontransparent model pixels and captured the complete native dashboard with the original animated bee. Xvfb requires software rendering and disabled DMABUF; those settings are confined to the isolated Linux CI helper and are not imposed on normal application startup. This establishes actual native webview rendering in the tested Nix environment. CI applies the installed check to the Windows installer, Linux Debian package and Linux AppImage.
+
+## OBS Browser Source on NixOS
+
+An isolated OBS Studio 32.1.2 instance rendered the unchanged production overlay assets through Browser Source at 1280×720 using the workstation's native NVIDIA graphics stack. An authenticated OBS WebSocket connection controlled only a temporary profile and scene. That scene contained only the browser source; browser audio was routed into OBS with monitoring disabled. No stream, microphone capture or desktop-audio capture was started. Original OBS configuration files were checksum-identical afterward.
+
+The recorded 22.4-second H.264/AAC output contained the animated Bumblebee and word-highlighted captions, with 48 kHz stereo audio. The local fixture used previously generated speech and its word timings, requiring no new provider request. Four speech events fetched audio through the test server. The captured audio had nonzero speech (approximately −24 dBFS RMS) and exact zero PCM during the checked silence windows after both `stop_speech` and WebSocket disconnection. Across 553 OBS volume-meter events, residual audio ended within approximately 162 ms of cancellation/disconnection. The overlay reconnected approximately one second after disconnection and played a subsequent greeting. OBS reported streaming inactive with zero transmitted bytes.
+
+This check used the real compiled renderer and an isolated HTTP/WebSocket fixture server, not the running Tauri application's transport or a live provider/Discord session. Those integration boundaries remain separate. It exposed a speech-bubble viewport-clipping issue at 1280×720 for follow-up. Under Xvfb, the installed OBS browser's CEF 127 GPU process crashed with both default software graphics and explicit software ANGLE; native graphics succeeded. OBS also exited with a segmentation-fault status when the temporary instance was terminated after its recording finalized. These OBS environment/shutdown limitations are not treated as successful headless acceptance.
