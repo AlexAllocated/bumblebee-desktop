@@ -574,6 +574,13 @@
           Bring your own provider accounts. Each connection is optional. Keys
           and authorization tokens stay in your operating-system keyring.
         </p>
+        <button
+          class="subtle"
+          onclick={() =>
+            openUrl(
+              "https://github.com/AlexAllocated/bumblebee-desktop/blob/main/docs/provider-setup.md",
+            )}>Step-by-step setup guide ↗</button
+        >
         <section class="settings-card">
           <h3>Azure Speech</h3>
           <p>Natural voices for Bumblebee and your chatters.</p>
@@ -712,7 +719,7 @@
           ><label
             >Live chat ID<input
               bind:value={snapshot.settings.youtubeLiveChatId}
-              placeholder="ID of your broadcast’s active live chat"
+              placeholder="Optional • discover your single active broadcast"
             /></label
           >
           <div class="button-row">

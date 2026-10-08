@@ -15,6 +15,8 @@ The intended installation flow is:
 
 Provider services can charge for use. Bumblebee has no hosted account, subscription, or bundled provider credentials. You do not need Docker, a database server, or a JavaScript runtime to run a packaged installer. Closing the window during an active session keeps Bumblebee in the tray; Quit stops the session.
 
+Follow the [provider setup guide](docs/provider-setup.md) for application registration, authorization, voice testing, and OBS setup.
+
 ## Chat puppets
 
 A viewer receives a random built-in puppet and voice on first participation. That selection persists across restarts and is tied to the platform's stable user ID.
