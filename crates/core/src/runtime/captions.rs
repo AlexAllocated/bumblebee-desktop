@@ -100,7 +100,7 @@ impl Engine {
 		if !self.caption_allowed(&user_id)? {
 			return Ok(());
 		}
-		let text = tokio::select! {biased;_=capture.cancel.cancelled()=>return Ok(()),text=self.providers.transcribe_audio(&model,pcm_wav(&capture.pcm),None,&capture.cancel)=>text?};
+		let text = tokio::select! {biased;_=capture.cancel.cancelled()=>return Ok(()),text=self.providers.transcribe_audio(&model,pcm_wav(&capture.pcm),crate::providers::TranscriptionContext::StreamerCaption,&capture.cancel)=>text?};
 		let member = tokio::select! {_=capture.cancel.cancelled()=>return Ok(()),member=audio.revalidate_participant(&user_id)=>member?};
 		if capture.cancel.is_cancelled() || member.is_none() || !self.caption_allowed(&user_id)? {
 			return Ok(());

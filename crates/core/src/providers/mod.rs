@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod oauth;
 pub mod streaming;
 mod transcription;
+pub(crate) use transcription::TranscriptionContext;
 
 use crate::{model::Voice, storage::Store};
 use anyhow::{Context, Result, ensure};

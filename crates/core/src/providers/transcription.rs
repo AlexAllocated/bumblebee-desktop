@@ -6,12 +6,40 @@ use tokio_util::sync::CancellationToken;
 
 const TRANSCRIPTION_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 
+#[derive(Clone, Copy)]
+pub(crate) enum TranscriptionContext {
+	VoiceCommand,
+	StreamerCaption,
+}
+
+impl TranscriptionContext {
+	fn prompt(self) -> &'static str {
+		// Preserve Nucleus's distinct ASR context for addressed commands and
+		// ordinary captions. These are vocabulary hints, not text rewrites.
+		match self {
+			Self::VoiceCommand => {
+				"Transcribe casual Discord voice chat verbatim. The speaker is likely speaking English. Do not translate. If the audio includes the wake phrase, it may be 'hey bumblebee'."
+			}
+			Self::StreamerCaption => {
+				"Discord voice chat, streamer names, Bumblebee, Twitch, YouTube, OBS"
+			}
+		}
+	}
+
+	fn language(self) -> Option<&'static str> {
+		match self {
+			Self::VoiceCommand => Some("en"),
+			Self::StreamerCaption => None,
+		}
+	}
+}
+
 impl Providers {
 	pub(crate) async fn transcribe_audio(
 		&self,
 		model: &str,
 		wav: Vec<u8>,
-		language: Option<&str>,
+		context: TranscriptionContext,
 		cancel: &CancellationToken,
 	) -> Result<String> {
 		ensure!(!cancel.is_cancelled(), "Transcription canceled");
@@ -21,7 +49,7 @@ impl Providers {
 			&self.secret("openai")?,
 			model,
 			wav,
-			language,
+			context,
 			cancel,
 		)
 		.await
@@ -34,20 +62,21 @@ async fn transcribe_at(
 	key: &str,
 	model: &str,
 	wav: Vec<u8>,
-	language: Option<&str>,
+	context: TranscriptionContext,
 	cancel: &CancellationToken,
 ) -> Result<String> {
 	ensure!(!cancel.is_cancelled(), "Transcription canceled");
 	let mut form = reqwest::multipart::Form::new()
 		.text("model", model.to_owned())
 		.text("response_format", "json")
+		.text("prompt", context.prompt())
 		.part(
 			"file",
 			reqwest::multipart::Part::bytes(wav)
 				.file_name("voice.wav")
 				.mime_str("audio/wav")?,
 		);
-	if let Some(language) = language {
+	if let Some(language) = context.language() {
 		// The current transcription model accepts language hints as an array;
 		// the retained 4o/Whisper models use the singular language parameter.
 		let field = if model == "gpt-transcribe" || model.starts_with("gpt-transcribe-") {
@@ -158,7 +187,7 @@ mod tests {
 				"test-key",
 				model,
 				b"RIFF-test-WAV".to_vec(),
-				Some("en"),
+				TranscriptionContext::VoiceCommand,
 				&CancellationToken::new(),
 			)
 			.await
@@ -183,6 +212,46 @@ mod tests {
 		job.abort();
 	}
 	#[tokio::test]
+	async fn voice_and_caption_vocabulary_reach_the_provider_without_rewriting_its_transcript() {
+		// In particular, a mistaken wake-prefix transcription is not stripped
+		// or replaced after the provider returns it.
+		let transcript = "Open the page, what time is the stream?";
+		let (url, requests, job) =
+			server(StatusCode::OK, serde_json::json!({"text":transcript})).await;
+		for (context, expected_prompt) in [
+			(
+				TranscriptionContext::VoiceCommand,
+				"Transcribe casual Discord voice chat verbatim. The speaker is likely speaking English. Do not translate. If the audio includes the wake phrase, it may be 'hey bumblebee'.",
+			),
+			(
+				TranscriptionContext::StreamerCaption,
+				"Discord voice chat, streamer names, Bumblebee, Twitch, YouTube, OBS",
+			),
+		] {
+			let result = transcribe_at(
+				&reqwest::Client::new(),
+				&url,
+				"test-key",
+				"gpt-transcribe",
+				b"RIFF-test-WAV".to_vec(),
+				context,
+				&CancellationToken::new(),
+			)
+			.await
+			.unwrap();
+			assert_eq!(result, transcript);
+			let wire = String::from_utf8(requests.lock().unwrap().last().unwrap().clone()).unwrap();
+			assert_eq!(wire.matches("name=\"prompt\"").count(), 1);
+			assert!(wire.contains(&format!("name=\"prompt\"\r\n\r\n{expected_prompt}\r\n")));
+			if matches!(context, TranscriptionContext::StreamerCaption) {
+				assert!(!wire.contains("hey bumblebee"));
+				assert!(!wire.contains("name=\"language\"") && !wire.contains("name=\"languages[]\""));
+			}
+		}
+		assert_eq!(requests.lock().unwrap().len(), 2);
+		job.abort();
+	}
+	#[tokio::test]
 	async fn forbidden_model_error_reports_model_access_and_does_not_retry() {
 		let (url, requests, job) = server(
 			StatusCode::FORBIDDEN,
@@ -195,7 +264,7 @@ mod tests {
 			"test-key",
 			"whisper-1",
 			vec![0],
-			None,
+			TranscriptionContext::VoiceCommand,
 			&CancellationToken::new(),
 		)
 		.await
@@ -222,7 +291,7 @@ mod tests {
 				"test-key",
 				"gpt-4o-mini-transcribe",
 				vec![0],
-				None,
+				TranscriptionContext::VoiceCommand,
 				&cancel
 			)
 			.await

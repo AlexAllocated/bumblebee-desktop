@@ -893,7 +893,7 @@ impl Engine {
 				 text=self.while_voice_processing(transcription_id.clone(),cancel.clone(),self.providers.transcribe_audio(
 						&settings.voice_transcription_model,
 						pcm_wav(&capture.pcm),
-						Some("en"),
+						crate::providers::TranscriptionContext::VoiceCommand,
 						&cancel,
 				 ))=>text?,
 		};
