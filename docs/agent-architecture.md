@@ -18,6 +18,8 @@ On restart, pending questions can still be answered. In-flight tool effects and 
 
 Voice requests revalidate their listener before each model request, tool execution and final delivery. A saved request also remains bound to its original voice channel; moving the configured connection cannot silently move a pending conversation.
 
+Disabling the agent blocks new voice captures, transcription dispatch and pending-answer continuation, including work that was queued before the setting changed. Pending requests remain saved; enable the agent before answering them, or cancel them while it is disabled. Ordinary chat and puppet commands do not resume pending agent work while disabled. Local stop/cancel keywords remain available. This preview requires the configured wake phrase for each spoken reply and does not open a follow-up listening window after questions. Spoken prompts explain that requirement; exact voice confirmations and fixed choices tolerate the wake address and sentence-ending periods/exclamation marks, with literal choice labels taking precedence. Compound or ambiguous statements never become approval.
+
 ## Retained capabilities
 
 The executable catalog includes:

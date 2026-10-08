@@ -553,6 +553,32 @@ impl Engine {
 			};
 		audio.configure_presence(presence).await
 	}
+	async fn begin_voice_capture(
+		&self,
+		user_id: &str,
+		username: String,
+		listen_allowed: bool,
+	) -> Result<Option<Capture>> {
+		if !listen_allowed {
+			return Ok(None);
+		}
+		let mut session = self.session.lock().await;
+		if !self.store.settings()?.ai_enabled {
+			return Ok(None);
+		}
+		let Some(session) = session
+			.as_mut()
+			.filter(|session| !session.cancel.is_cancelled())
+		else {
+			return Ok(None);
+		};
+		Ok(Some(Capture {
+			username,
+			pcm: Vec::new(),
+			cancel: session.voice_cancel.child_token(),
+			actor_scope: session.agent_scopes.lease(&format!("discord:{user_id}")),
+		}))
+	}
 	async fn run_discord(
 		self: &Arc<Self>,
 		token: String,
@@ -592,11 +618,11 @@ impl Engine {
                 sequence=Some(incoming.sequence);
                 match incoming.event {
                     VoiceEvent::KeywordDetected{user_id,username,keyword_kind,..}=>{
-                        if keyword_kind=="wake"&&audio.is_listen_allowed(&user_id){
+                        if keyword_kind=="wake"{
                             if captures.len()>=4&&!captures.contains_key(&user_id){continue}
-                            let (capture_cancel,actor_scope)=match self.session.lock().await.as_mut(){Some(session)=>(session.voice_cancel.child_token(),session.agent_scopes.lease(&format!("discord:{user_id}"))),None=>continue};
+                            let Some(capture)=self.begin_voice_capture(&user_id,username,audio.is_listen_allowed(&user_id)).await? else {continue};
                             audio.stream_participant(&user_id,true);
-                            if let Some(previous)=captures.insert(user_id,Capture{username,pcm:Vec::new(),cancel:capture_cancel,actor_scope}){previous.cancel.cancel();}
+                            if let Some(previous)=captures.insert(user_id,capture){previous.cancel.cancel();}
                         }
                         else if keyword_kind=="cancel"||keyword_kind=="stop"{
                             // Listener grants do not grant control over another person's turn.
@@ -618,12 +644,12 @@ impl Engine {
                     VoiceEvent::UtteranceFinalized{user_id,..}=>{audio.stream_participant(&user_id,false);if let Some(capture)=captures.remove(&user_id){
                         if capture.cancel.is_cancelled()||capture.actor_scope.cancel.is_cancelled(){continue}
                         if transcriptions.len()>=4{self.emit(OverlayEvent::Status{message:"Voice transcription is busy; please try again".into()});continue}
-                        let engine=self.clone();let audio=audio.clone();
+                        let engine=self.clone();
                         // Keep the actor lease through capture, transcription and queue submission.
                         transcriptions.spawn(async move{
                             let scope=capture.actor_scope.clone();
                             let voice_cancel=capture.cancel.clone();
-                            let message=tokio::select!{biased;_=scope.cancel.cancelled()=>return Ok(()),result=engine.transcribe_voice(user_id,capture,audio)=>result?};
+                            let message=tokio::select!{biased;_=scope.cancel.cancelled()=>return Ok(()),result=engine.transcribe_voice(user_id,capture)=>result?};
                             if let Some(message)=message {engine.dispatch_transcription(message,voice_cancel,scope).await} else {Ok(())}
                         });
                     }},
@@ -646,7 +672,6 @@ impl Engine {
 		self: &Arc<Self>,
 		user_id: String,
 		capture: Capture,
-		audio: Arc<AudioRuntime>,
 	) -> Result<Option<ChatMessage>> {
 		let cancel = capture.cancel;
 		let actor_scope = capture.actor_scope;
@@ -654,8 +679,19 @@ impl Engine {
 			return Ok(None);
 		}
 		let settings = self.store.settings()?;
+		if !settings.ai_enabled {
+			return Ok(None);
+		}
+		let audio = self
+			.audio()
+			.await
+			.context("Discord voice is disconnected")?;
 		let allowed = tokio::select! {_=cancel.cancelled()=>return Ok(None),allowed=audio.revalidate_listener(&user_id)=>allowed?};
 		ensure!(allowed, "Voice requester is no longer permitted");
+		// Settings may have changed while live Discord permission checks were in flight.
+		if cancel.is_cancelled() || !self.store.settings()?.ai_enabled {
+			return Ok(None);
+		}
 		let wav = pcm_wav(&capture.pcm);
 		let part = reqwest::multipart::Part::bytes(wav)
 			.file_name("voice.wav")
@@ -677,6 +713,9 @@ impl Engine {
 		let allowed = tokio::select! {_=cancel.cancelled()=>return Ok(None),allowed=audio.revalidate_listener(&user_id)=>allowed?};
 		ensure!(allowed, "Voice permission changed during transcription");
 		let current = self.store.settings()?;
+		if !current.ai_enabled {
+			return Ok(None);
+		}
 		ensure!(
 			current.discord_guild_id == settings.discord_guild_id
 				&& current.discord_voice_channel_id == settings.discord_voice_channel_id,
@@ -707,6 +746,9 @@ impl Engine {
 			return self
 				.handle_chat_scoped(message, scope.cancel.child_token())
 				.await;
+		}
+		if !self.store.settings()?.ai_enabled {
+			return Ok(());
 		}
 		// Do not turn a canceled utterance into fresh work by putting it back through raw chat ingress.
 		tokio::select! {biased;

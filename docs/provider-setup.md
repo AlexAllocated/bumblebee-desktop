@@ -33,6 +33,8 @@ External Google projects in Testing mode issue refresh tokens that expire after 
 3. Save the bot token in Bumblebee. Enable Developer Mode in Discord and copy your server ID, your own user ID, and the text/voice channel IDs into Settings. Channel overrides must allow the bot to access those channels.
 4. Select **Validate**, save Settings, and start the session. Discord chat and voice share this one bot connection. Bumblebee does not sign in as or automate your personal Discord account.
 
+Enable Bumblebee's agent to use voice requests. Turning it off blocks new wake-triggered captures and transcription uploads; local stop/cancel detection still works. Pending requests stay saved, but you must enable the agent to answer them; cancellation remains available while disabled. In this preview, every spoken reply needs the configured wake phrase, including answers to confirmations: say **Hey Bumblebee**, then **yes** or **no** (or **Bumblebee** if you selected that shorter wake phrase). Bumblebee does not automatically keep listening after asking a question. You can also answer pending requests in Discord text or the dashboard.
+
 ## OBS and the first session
 
 Copy the overlay URL from the dashboard into an OBS **Browser Source**, normally at 1920 × 1080. Keep Bumblebee running. The URL is private to this computer and serves only the overlay; no tunnel or router forwarding is needed. Preview speech is muted by default to avoid hearing both the dashboard and OBS.

@@ -193,6 +193,91 @@ async fn revoked_voice_capture_cannot_dispatch_even_when_actor_requests_remain_a
 }
 
 #[tokio::test]
+async fn disabled_agent_blocks_new_captures_and_late_voice_provider_dispatch() {
+	let (_temporary, engine) = fixture();
+	engine.start().await.unwrap();
+	assert!(
+		engine
+			.begin_voice_capture("listener", "Listener".into(), true)
+			.await
+			.unwrap()
+			.is_none()
+	);
+	let mut settings = engine.store.settings().unwrap();
+	settings.ai_enabled = true;
+	engine.store.set("installation", &settings).unwrap();
+	assert!(
+		engine
+			.begin_voice_capture("listener", "Listener".into(), false)
+			.await
+			.unwrap()
+			.is_none()
+	);
+	let mut capture = engine
+		.begin_voice_capture("listener", "Listener".into(), true)
+		.await
+		.unwrap()
+		.unwrap();
+	capture.pcm = vec![0; 6400];
+	let voice_cancel = capture.cancel.clone();
+	let scope = capture.actor_scope.clone();
+	let session_guard = engine.session.lock().await;
+	let mut queued_capture = Box::pin(engine.begin_voice_capture("queued", "Queued".into(), true));
+	assert!(futures_util::poll!(queued_capture.as_mut()).is_pending());
+	settings.ai_enabled = false;
+	engine.store.set("installation", &settings).unwrap();
+	drop(session_guard);
+	assert!(queued_capture.await.unwrap().is_none());
+	// The real provider-dispatch entry point returns before requiring a gateway or credential.
+	assert!(
+		engine
+			.transcribe_voice("listener".into(), capture)
+			.await
+			.unwrap()
+			.is_none()
+	);
+	let mut events = engine.events.subscribe();
+	let mut source = message(
+		"late-disabled-transcript",
+		"listener",
+		false,
+		"Bumblebee answer me",
+	);
+	source.platform = "discord_voice".into();
+	engine
+		.dispatch_transcription(source, voice_cancel, scope.clone())
+		.await
+		.unwrap();
+	assert!(engine.store.chatter("discord", "listener").is_err());
+	assert!(events.try_recv().is_err());
+	// Local interruption remains available even though new AI work is disabled.
+	let mut cancel = message("disabled-stop", "owner", true, "bumblebee stop");
+	cancel.platform = "discord_voice".into();
+	engine
+		.dispatch_transcription(cancel, CancellationToken::new(), scope.clone())
+		.await
+		.unwrap();
+	assert!(scope.cancel.is_cancelled());
+	settings.ai_enabled = true;
+	engine.store.set("installation", &settings).unwrap();
+	let mut capture = engine
+		.begin_voice_capture("listener", "Listener".into(), true)
+		.await
+		.unwrap()
+		.unwrap();
+	capture.pcm = vec![0; 6400];
+	assert!(
+		engine
+			.transcribe_voice("listener".into(), capture)
+			.await
+			.unwrap_err()
+			.to_string()
+			.contains("Discord voice is disconnected")
+	);
+	engine.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn transcribed_cancel_finishes_cleanup_without_cancelling_its_own_future() {
 	let (_temporary, engine) = fixture();
 	engine.start().await.unwrap();
@@ -280,6 +365,9 @@ async fn session_stop_surfaces_aborted_work_and_preserves_uncertain_effects_with
 #[tokio::test]
 async fn desktop_pending_answer_is_private_and_uses_original_actor_cancellation() {
 	let (_temporary, engine) = fixture();
+	let mut settings = engine.store.settings().unwrap();
+	settings.ai_enabled = true;
+	engine.store.set("installation", &settings).unwrap();
 	engine.start().await.unwrap();
 	let (tx, mut rx) = mpsc::channel(4);
 	engine.session.lock().await.as_mut().unwrap().agent_tx = tx;

@@ -185,6 +185,13 @@ fn matching_pending(store: &Store, message: &ChatMessage) -> Result<Vec<PendingI
 		.collect()
 }
 pub fn pending_for_message(store: &Store, message: &ChatMessage) -> Result<bool> {
+	if !store.settings()?.ai_enabled
+		&& !is_desktop_answer(message)
+		&& !is_pending_cancel(&message.text)
+		&& !message.text.trim().starts_with("!answer ")
+	{
+		return Ok(false);
+	}
 	Ok(!matching_pending(store, message)?.is_empty())
 }
 pub fn pending_actor_for_message(store: &Store, message: &ChatMessage) -> Result<Option<String>> {
@@ -220,6 +227,10 @@ pub fn desktop_answer_message(store: &Store, id: &str, answer: &str) -> Result<C
 	ensure!(
 		store.pending_inputs()?.iter().any(|p| p.id == id),
 		"This question expired or was already answered"
+	);
+	ensure!(
+		is_pending_cancel(answer) || store.settings()?.ai_enabled,
+		"Enable the agent to answer this pending request"
 	);
 	Ok(ChatMessage {
 		platform: "desktop_answer".into(),
@@ -343,8 +354,18 @@ trait Host: Sync {
 struct RuntimeHost {
 	engine: Arc<Engine>,
 }
+impl RuntimeHost {
+	fn require_enabled(&self) -> Result<()> {
+		ensure!(
+			self.engine.store.settings()?.ai_enabled,
+			"The agent is disabled; enable it before requesting more work"
+		);
+		Ok(())
+	}
+}
 impl Host for RuntimeHost {
 	async fn reply_route(&self, cp: &Checkpoint, owner: bool) -> Result<ReplyRoute> {
+		self.require_enabled()?;
 		delivery::reply_route(&self.engine, cp, owner).await
 	}
 	fn store(&self) -> &Store {
@@ -354,7 +375,10 @@ impl Host for RuntimeHost {
 		tools::definitions()
 	}
 	async fn owner(&self, source: &ChatMessage) -> Result<bool> {
-		is_owner(&self.engine, source).await
+		self.require_enabled()?;
+		let owner = is_owner(&self.engine, source).await?;
+		self.require_enabled()?;
+		Ok(owner)
 	}
 	async fn request(
 		&self,
@@ -363,7 +387,9 @@ impl Host for RuntimeHost {
 		owner: bool,
 		cancel: CancellationToken,
 	) -> Result<Value> {
+		self.require_enabled()?;
 		validate_voice_context(&self.engine, cp).await?;
+		self.require_enabled()?;
 		model::request(&self.engine, cp, defs, owner, cancel).await
 	}
 	async fn execute(
@@ -373,7 +399,9 @@ impl Host for RuntimeHost {
 		args: &Value,
 		cancel: CancellationToken,
 	) -> Result<Value> {
+		self.require_enabled()?;
 		validate_voice_context(&self.engine, cp).await?;
+		self.require_enabled()?;
 		tools::execute(&self.engine, cp, call, args, cancel).await
 	}
 	async fn prompt(
@@ -382,6 +410,7 @@ impl Host for RuntimeHost {
 		pending: &PendingInput,
 		cancel: CancellationToken,
 	) -> Result<()> {
+		self.require_enabled()?;
 		delivery::prompt(&self.engine, cp, pending, cancel).await
 	}
 	async fn finish(
@@ -390,7 +419,9 @@ impl Host for RuntimeHost {
 		reply: &FinalReply,
 		cancel: CancellationToken,
 	) -> Result<Value> {
+		self.require_enabled()?;
 		validate_voice_context(&self.engine, cp).await?;
+		self.require_enabled()?;
 		delivery::finish(&self.engine, cp, reply, cancel).await
 	}
 }
@@ -439,6 +470,15 @@ async fn resume<H: Host>(
 		cp.pending.as_ref().is_some_and(|p| p.id == pending.id),
 		"Pending question checkpoint does not match"
 	);
+	// Canceling an already-owned pending request never requires model/provider work.
+	if is_pending_cancel(answer) {
+		host.store().cancel_agent_turn(&cp.id)?;
+		return Ok(true);
+	}
+	ensure!(
+		host.store().settings()?.ai_enabled,
+		"Enable the agent to answer this pending request"
+	);
 	let owner = tokio::select! {biased;_=cancel.cancelled()=>bail!("Request cancelled during permission check"),result=host.owner(&cp.source)=>result?};
 	ensure!(
 		!cancel.is_cancelled(),
@@ -455,14 +495,12 @@ async fn resume<H: Host>(
 			"The linked streamer identity changed; this private request cannot continue"
 		);
 	}
-	if matches!(
-		answer.to_ascii_lowercase().as_str(),
-		"cancel" | "never mind" | "!cancel"
-	) {
-		host.store().cancel_agent_turn(&cp.id)?;
-		return Ok(true);
-	}
 	let resolved = if pending.kind == "confirmation" {
+		let answer = if message.platform == "discord_voice" {
+			spoken_confirmation(answer, &host.store().settings()?.wake_word)
+		} else {
+			answer
+		};
 		match answer.to_ascii_lowercase().as_str() {
 			"yes" | "confirm" | "approve" => "yes".to_string(),
 			"no" | "reject" | "decline" => "no".to_string(),
@@ -470,14 +508,33 @@ async fn resume<H: Host>(
 		}
 	} else if pending.choices.is_empty() {
 		answer.to_owned()
-	} else if let Some(choice) = pending
-		.choices
-		.iter()
-		.find(|choice| choice.eq_ignore_ascii_case(answer))
-	{
-		choice.clone()
 	} else {
-		bail!("Choose one of the saved choices, or use cancel")
+		let settings = host.store().settings()?;
+		let spoken = (message.platform == "discord_voice")
+			.then(|| spoken_answer_body(answer, &settings.wake_word));
+		// Literal choices win, including punctuation that is part of a saved label.
+		pending
+			.choices
+			.iter()
+			.find(|choice| choice.eq_ignore_ascii_case(answer))
+			.or_else(|| {
+				spoken.and_then(|body| {
+					pending
+						.choices
+						.iter()
+						.find(|choice| choice.eq_ignore_ascii_case(body))
+				})
+			})
+			.or_else(|| {
+				spoken.and_then(|body| {
+					pending
+						.choices
+						.iter()
+						.find(|choice| choice.eq_ignore_ascii_case(trim_spoken_punctuation(body)))
+				})
+			})
+			.context("Choose one of the saved choices, or use cancel")?
+			.clone()
 	};
 	cp.answer = Some(resolved.clone());
 	if pending.kind == "confirmation" && resolved == "yes" {
@@ -498,6 +555,41 @@ async fn resume<H: Host>(
 	)?;
 	run_guarded(host, &mut cp, cancel).await?;
 	Ok(true)
+}
+fn is_pending_cancel(answer: &str) -> bool {
+	matches!(
+		answer.trim().to_ascii_lowercase().as_str(),
+		"cancel" | "never mind" | "!cancel"
+	)
+}
+/// Speech recognition can retain the wake address and add sentence punctuation.
+/// Only an otherwise exact confirmation counts; never extract "yes" from a longer statement.
+fn spoken_confirmation<'a>(answer: &'a str, wake_word: &str) -> &'a str {
+	trim_spoken_punctuation(spoken_answer_body(answer, wake_word))
+}
+fn trim_spoken_punctuation(answer: &str) -> &str {
+	answer.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '!'))
+}
+fn spoken_answer_body<'a>(answer: &'a str, wake_word: &str) -> &'a str {
+	let wake = if wake_word == "bumblebee" {
+		"bumblebee"
+	} else {
+		"hey bumblebee"
+	};
+	let answer = answer.trim();
+	match answer.get(..wake.len()) {
+		Some(prefix) if prefix.eq_ignore_ascii_case(wake) => {
+			let rest = &answer[wake.len()..];
+			if rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ',' | ':' | '.' | '!')) {
+				rest.trim_start_matches(|c: char| {
+					c.is_whitespace() || matches!(c, ',' | ':' | '.' | '!')
+				})
+			} else {
+				answer
+			}
+		}
+		_ => answer,
+	}
 }
 async fn run_guarded<H: Host>(
 	host: &H,

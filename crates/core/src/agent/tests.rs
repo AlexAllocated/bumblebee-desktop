@@ -61,6 +61,10 @@ impl Host for FixtureHost {
 	fn definitions(&self) -> Vec<ToolDefinition> {
 		vec![
 			definition("configureTurnDelivery", false, false),
+			tools::definitions()
+				.into_iter()
+				.find(|d| d.name == "requestUserInput")
+				.unwrap(),
 			definition("ban", true, true),
 			definition("after", false, true),
 			definition("inspect", false, false),
@@ -158,6 +162,9 @@ fn checkpoint(host: &FixtureHost) -> Checkpoint {
 	checkpoint_source(host, source("ban the saved user, then announce the result"))
 }
 fn checkpoint_source(host: &FixtureHost, input: ChatMessage) -> Checkpoint {
+	let mut settings = host.store.settings().unwrap();
+	settings.ai_enabled = true;
+	host.store.set("installation", &settings).unwrap();
 	let cp = Checkpoint {
 		id: uuid::Uuid::new_v4().to_string(),
 		source: input,
@@ -568,4 +575,337 @@ async fn silent_pending_questions_are_dashboard_only_and_do_not_create_chatter_m
 			.unwrap()
 	);
 	assert!(host.store.chatters("").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn spoken_confirmations_accept_the_wake_address_but_never_infer_compound_approval() {
+	let host = FixtureHost::new(
+		std::path::Path::new(":memory:"),
+		vec![calls(&[("ban-id", "ban")]), terminal("Done.")],
+	);
+	let original = ChatMessage {
+		platform: "discord_voice".into(),
+		..source("ban the exact approved target")
+	};
+	let mut cp = checkpoint_source(&host, original.clone());
+	cp.delivery = Some(Delivery {
+		speech: true,
+		public_progress: false,
+		targets: vec!["source".into()],
+		discord_dm_user_id: None,
+		dm_channel: None,
+	});
+	run_guarded(&host, &mut cp, CancellationToken::new())
+		.await
+		.unwrap();
+	for text in [
+		"Yes?",
+		"Hey Bumblebee, yes, but use another target.",
+		"Hey Bumblebee, don't approve.",
+		"Hey Bumblebees yes.",
+	] {
+		let reply = ChatMessage {
+			text: text.into(),
+			..original.clone()
+		};
+		assert!(
+			resume(&host, &reply, CancellationToken::new())
+				.await
+				.is_err(),
+			"{text}"
+		);
+		assert!(host.effects.lock().unwrap().is_empty());
+	}
+	let text_reply = ChatMessage {
+		platform: "discord".into(),
+		text: "Hey Bumblebee, yes.".into(),
+		..original.clone()
+	};
+	assert!(
+		resume(&host, &text_reply, CancellationToken::new())
+			.await
+			.is_err()
+	);
+	let reply = ChatMessage {
+		text: "Hey Bumblebee, yes.".into(),
+		..original
+	};
+	assert!(
+		resume(&host, &reply, CancellationToken::new())
+			.await
+			.unwrap()
+	);
+	assert_eq!(*host.effects.lock().unwrap(), vec!["ban"]);
+	assert_eq!(spoken_confirmation("Bumblebee, NO!", "bumblebee"), "NO");
+	assert_eq!(spoken_confirmation("Yes.", "hey_bumblebee"), "Yes");
+}
+
+#[tokio::test]
+async fn spoken_fixed_choices_preserve_literal_labels_before_stripping_sentence_punctuation() {
+	for (answer, expected) in [
+		("Hey Bumblebee, blue.", "Blue"),
+		("Hey Bumblebee, Blue!", "Blue!"),
+		("Blue!", "Blue!"),
+	] {
+		let question = json!({"status":"completed","output":[{"type":"function_call","call_id":"choose-color","name":"requestUserInput","arguments":json!({"question":"Which color?","choices":["Blue","Blue!","Red"]}).to_string()}]});
+		let host = FixtureHost::new(
+			std::path::Path::new(":memory:"),
+			vec![question, terminal("Chosen.")],
+		);
+		let original = ChatMessage {
+			platform: "discord_voice".into(),
+			..source("choose a color")
+		};
+		let mut cp = checkpoint_source(&host, original.clone());
+		cp.delivery = Some(Delivery {
+			speech: true,
+			public_progress: false,
+			targets: vec!["source".into()],
+			discord_dm_user_id: None,
+			dm_channel: None,
+		});
+		run_guarded(&host, &mut cp, CancellationToken::new())
+			.await
+			.unwrap();
+		for (platform, text) in [
+			("discord", "Hey Bumblebee, blue."),
+			("discord_voice", "Hey Bumblebee, blue or red."),
+			("discord_voice", "Blue?"),
+		] {
+			let invalid = ChatMessage {
+				platform: platform.into(),
+				text: text.into(),
+				..original.clone()
+			};
+			assert!(
+				resume(&host, &invalid, CancellationToken::new())
+					.await
+					.is_err()
+			);
+			assert_eq!(host.store.pending_inputs().unwrap().len(), 1);
+		}
+		let reply = ChatMessage {
+			text: answer.into(),
+			..original
+		};
+		assert!(
+			resume(&host, &reply, CancellationToken::new())
+				.await
+				.unwrap()
+		);
+		let saved = host.store.turn(&cp.id).unwrap();
+		let output = saved.checkpoint["items"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|v| v["type"] == "function_call_output" && v["call_id"] == "choose-color")
+			.unwrap();
+		let result: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+		assert_eq!(result["untrustedToolResult"]["answer"], expected);
+		assert_eq!(saved.state, "completed");
+	}
+}
+
+#[tokio::test]
+async fn disabling_ai_pauses_all_pending_answers_but_preserves_cancel_and_later_resume() {
+	let host = FixtureHost::new(
+		std::path::Path::new(":memory:"),
+		vec![
+			calls(&[("first-ban", "ban")]),
+			terminal("Done."),
+			calls(&[("second-ban", "ban")]),
+		],
+	);
+	for cancel_only in [false, true] {
+		let mut cp = checkpoint(&host);
+		cp.delivery = Some(Delivery {
+			speech: false,
+			public_progress: false,
+			targets: vec!["source".into()],
+			discord_dm_user_id: None,
+			dm_channel: None,
+		});
+		run_guarded(&host, &mut cp, CancellationToken::new())
+			.await
+			.unwrap();
+		let pending = host.store.pending_inputs().unwrap().remove(0);
+		let queued_desktop = desktop_answer_message(&host.store, &pending.id, "yes").unwrap();
+		let mut settings = host.store.settings().unwrap();
+		settings.ai_enabled = false;
+		host.store.set("installation", &settings).unwrap();
+		assert!(!pending_for_message(&host.store, &source("unrelated ordinary chat")).unwrap());
+		assert!(!pending_for_message(&host.store, &source("yes")).unwrap());
+		assert!(pending_for_message(&host.store, &source("!cancel")).unwrap());
+		assert!(pending_for_message(&host.store, &source("cancel")).unwrap());
+		assert!(
+			desktop_answer_message(&host.store, &pending.id, "yes")
+				.unwrap_err()
+				.to_string()
+				.contains("Enable the agent")
+		);
+		let explicit = source(&format!("!answer {} yes", pending.id));
+		assert!(pending_for_message(&host.store, &explicit).unwrap());
+		let unexpected_permission_check = CancellationToken::new();
+		*host.cancel_owner.lock().unwrap() = Some((0, unexpected_permission_check.clone()));
+		let effects_before = host.effects.lock().unwrap().len();
+		for reply in [source("yes"), explicit.clone(), queued_desktop] {
+			assert!(
+				resume(&host, &reply, CancellationToken::new())
+					.await
+					.unwrap_err()
+					.to_string()
+					.contains("Enable the agent")
+			);
+		}
+		assert!(!unexpected_permission_check.is_cancelled());
+		assert_eq!(host.store.turn(&cp.id).unwrap().state, "waiting");
+		assert_eq!(host.effects.lock().unwrap().len(), effects_before);
+		*host.cancel_owner.lock().unwrap() = None;
+		if cancel_only {
+			let cancel = desktop_answer_message(&host.store, &pending.id, "cancel").unwrap();
+			assert!(
+				resume(&host, &cancel, CancellationToken::new())
+					.await
+					.unwrap()
+			);
+			assert_eq!(host.store.turn(&cp.id).unwrap().state, "cancelled");
+		} else {
+			settings.ai_enabled = true;
+			host.store.set("installation", &settings).unwrap();
+			assert!(
+				resume(&host, &explicit, CancellationToken::new())
+					.await
+					.unwrap()
+			);
+			assert_eq!(host.store.turn(&cp.id).unwrap().state, "completed");
+			assert_eq!(host.effects.lock().unwrap().len(), effects_before + 1);
+		}
+	}
+}
+
+#[tokio::test]
+async fn self_disable_keeps_its_success_receipt_and_stops_later_runtime_boundaries() {
+	struct ForbiddenSecrets;
+	impl crate::providers::SecretStore for ForbiddenSecrets {
+		fn get(&self, _: &str) -> Result<Option<String>> {
+			panic!("Disabled runtime must not access provider credentials")
+		}
+		fn set(&self, _: &str, _: &str) -> Result<()> {
+			panic!("No test credentials")
+		}
+		fn delete(&self, _: &str) -> Result<()> {
+			panic!("No test credentials")
+		}
+	}
+	let data = tempfile::tempdir().unwrap();
+	let store = Arc::new(Store::open(&data.path().join("state.sqlite")).unwrap());
+	let mut settings = store.settings().unwrap();
+	settings.ai_enabled = true;
+	store.set("installation", &settings).unwrap();
+	let providers =
+		crate::providers::Providers::new(store.clone(), Arc::new(ForbiddenSecrets)).unwrap();
+	let (events, mut received) = tokio::sync::broadcast::channel(32);
+	let engine = Engine::new(
+		providers,
+		crate::runtime::EnginePaths {
+			data_dir: data.path().into(),
+			native_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+				.join("../../src-tauri/resources"),
+		},
+		events,
+	)
+	.unwrap();
+	let host = RuntimeHost { engine };
+	let disable_args = json!({"model":null,"enabled":false});
+	let disable = ToolCall {
+		id: "self-disable".into(),
+		name: "setAiSettings".into(),
+		arguments: disable_args.to_string(),
+	};
+	let later_args = json!({"enabled":false});
+	let later = ToolCall {
+		id: "later-change".into(),
+		name: "setChatTtsSettings".into(),
+		arguments: later_args.to_string(),
+	};
+	let mut cp = Checkpoint {
+		id: "turn".into(),
+		source: ChatMessage {
+			platform: "preview".into(),
+			..source("disable the agent")
+		},
+		model: "unused".into(),
+		items: vec![],
+		rounds: 0,
+		executed: 0,
+		calls: vec![disable.clone(), later.clone()],
+		cursor: 0,
+		delivery: Some(Delivery {
+			speech: false,
+			public_progress: false,
+			targets: vec!["source".into()],
+			discord_dm_user_id: None,
+			dm_channel: None,
+		}),
+		artifacts: vec![],
+		pending: None,
+		reply_route: None,
+		answer: None,
+		approved_call: None,
+		voice_channel_id: None,
+	};
+	store
+		.create_turn(
+			&cp.id,
+			&durable::actor(&cp.source),
+			&serde_json::to_value(&cp).unwrap(),
+		)
+		.unwrap();
+	let error = run_guarded(&host, &mut cp, CancellationToken::new())
+		.await
+		.unwrap_err();
+	assert!(error.to_string().contains("agent is disabled"));
+	let receipt = store
+		.begin_call(&cp.id, &disable.id, &disable.name, &disable.arguments)
+		.unwrap()
+		.unwrap();
+	assert_eq!(
+		serde_json::from_str::<Value>(&receipt).unwrap()["status"],
+		"applied"
+	);
+	assert!(!store.settings().unwrap().ai_enabled);
+	assert!(store.settings().unwrap().read_chat);
+	assert_eq!(store.turn(&cp.id).unwrap().state, "failed");
+	assert!(
+		host
+			.request(&cp, &[], true, CancellationToken::new())
+			.await
+			.unwrap_err()
+			.to_string()
+			.contains("agent is disabled")
+	);
+	assert!(
+		host
+			.execute(&mut cp, &later, &later_args, CancellationToken::new())
+			.await
+			.unwrap_err()
+			.to_string()
+			.contains("agent is disabled")
+	);
+	assert!(
+		host
+			.finish(
+				&cp,
+				&FinalReply {
+					text: "Must stay local".into(),
+					messages: None
+				},
+				CancellationToken::new()
+			)
+			.await
+			.unwrap_err()
+			.to_string()
+			.contains("agent is disabled")
+	);
+	assert!(received.try_recv().is_err());
 }

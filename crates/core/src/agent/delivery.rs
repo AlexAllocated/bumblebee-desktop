@@ -179,11 +179,28 @@ pub async fn prompt(
 			);
 			engine.send_message(&cp.source, &text).await?;
 			if policy.speech && cp.source.platform == "discord_voice" {
-				engine.speak(&text, None, cancel).await?;
+				let spoken = spoken_prompt(pending, &engine.store.settings()?.wake_word);
+				engine.speak(&spoken, None, cancel).await?;
 			}
 		}
 	}
 	Ok(())
+}
+fn spoken_prompt(pending: &PendingInput, wake_word: &str) -> String {
+	let wake = if wake_word == "bumblebee" {
+		"Bumblebee"
+	} else {
+		"Hey Bumblebee"
+	};
+	let choices = if pending.choices.is_empty() {
+		String::new()
+	} else {
+		format!(" Choices: {}.", pending.choices.join(" or "))
+	};
+	format!(
+		"{}{} To answer by voice, say {wake}, then your answer. You can also answer in Discord text or the dashboard. Say Bumblebee cancel to stop this request.",
+		pending.prompt, choices
+	)
 }
 
 pub async fn finish(
@@ -559,5 +576,29 @@ mod routing_tests {
 			prompt_destination(&source("twitch"), &policy, true, "999"),
 			PromptDestination::Source
 		);
+	}
+	#[test]
+	fn spoken_question_explains_the_configured_wake_phrase_without_chat_command_syntax() {
+		let pending = PendingInput {
+			id: "deadbeef".into(),
+			turn_id: "turn".into(),
+			actor: "discord:123".into(),
+			channel: "discord:10".into(),
+			kind: "confirmation".into(),
+			prompt: "Approve this action?".into(),
+			choices: vec!["yes".into(), "no".into()],
+			owner_required: true,
+			expires_at: 0,
+		};
+		for (setting, phrase) in [
+			("hey_bumblebee", "Hey Bumblebee"),
+			("bumblebee", "Bumblebee"),
+		] {
+			let prompt = spoken_prompt(&pending, setting);
+			assert!(prompt.contains(&format!("say {phrase}, then your answer")));
+			assert!(prompt.contains("yes or no"));
+			assert!(prompt.contains("dashboard"));
+			assert!(!prompt.contains("!answer") && !prompt.contains(&pending.id));
+		}
 	}
 }
