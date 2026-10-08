@@ -18,7 +18,9 @@ dbus-update-activation-environment DISPLAY XAUTHORITY XDG_DATA_HOME XDG_CONFIG_H
 # autoactivate a second daemon before this one has registered its name.
 printf '%s' 'temporary-ci-keyring' | gnome-keyring-daemon --foreground --unlock --components=secrets >"$smoke_root/keyring.log" 2>&1 &
 keyring_pid=$!
-trap 'kill "$keyring_pid" 2>/dev/null || true; rm -rf "$smoke_root"' EXIT
+# The portal may mount a FUSE filesystem below runtime/doc. Its owning DBus
+# session tears that down on exit; do not recursively remove an active mount.
+trap 'kill "$keyring_pid" 2>/dev/null || true; wait "$keyring_pid" 2>/dev/null || true; rm -rf "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"' EXIT
 keyring_ready=false
 for attempt in $(seq 1 100); do
   if dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.freedesktop.secrets | grep -q 'boolean true' &&

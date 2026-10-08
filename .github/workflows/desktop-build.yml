@@ -41,6 +41,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
+          cache-workspace-crates: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
