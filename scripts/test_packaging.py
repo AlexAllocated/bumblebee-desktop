@@ -20,6 +20,18 @@ notices = module("collect-os-notices")
 
 
 class PackagingTests(unittest.TestCase):
+    def test_configured_appimage_png_icons_are_square(self):
+        root = Path(__file__).resolve().parents[1] / "src-tauri"
+        config = json.loads((root / "tauri.conf.json").read_text())
+        icons = [root / name for name in config["bundle"]["icon"] if name.endswith(".png")]
+        self.assertTrue(icons, "AppImage requires at least one PNG icon")
+        for icon in icons:
+            content = icon.read_bytes()
+            self.assertEqual(content[:8], b"\x89PNG\r\n\x1a\n")
+            width, height = struct.unpack(">II", content[16:24])
+            self.assertEqual(width, height, f"AppImage requires a square icon: {icon.name}")
+            self.assertGreaterEqual(width, 32)
+
     def test_windows_toolchain_follows_the_installed_2026_runner(self):
         data = json.dumps([{"installationPath": "C:/VS/2026", "installationVersion": "18.10.100"}])
         with patch("native_packaging.subprocess.check_output", return_value=data):

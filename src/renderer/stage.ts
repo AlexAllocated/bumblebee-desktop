@@ -4,6 +4,7 @@ import { loadModel } from "./legacy/bumblebee/loadModel";
 import { createPuppet, type PuppetController } from "./legacy/puppet";
 import { screenToWorld } from "./legacy/utils/screenToWorld";
 import type { Chatter, OverlayEvent, OverlaySettings } from "../lib/types";
+import { bubbleCenter, bubbleWidthLimit, wordFragments } from "./bubbleLayout";
 
 type Speech = Extract<OverlayEvent, { type: "speech" }>;
 type Entry = {
@@ -45,6 +46,7 @@ export function createStage(
   let playing = false;
   let playGeneration = 0;
   let cleanupSpeech: (() => void) | null = null;
+  let bubbleAnchor: Entry | null | undefined;
   const queue: Speech[] = [];
   const received = new Set<string>();
   const bubble = document.createElement("div");
@@ -98,7 +100,8 @@ export function createStage(
       if (showPuppets) void entry.puppet.show();
       entry.label.hidden = !settings.puppetsVisible;
     }
-    if (!settings.bubblesVisible) bubble.hidden = true;
+    bubble.hidden = !settings.bubblesVisible || bubbleAnchor === undefined;
+    placeBubble();
   }
   const ready = loadModel({
     scene,
@@ -120,8 +123,25 @@ export function createStage(
   void ready.catch((error) => {
     if (!disposed) console.error("Bumblebee model could not load", error);
   });
-  const resize = new ResizeObserver(placeBee);
+  function placeBubble() {
+    if (bubble.hidden || disposed) return;
+    const width = container.clientWidth;
+    bubble.style.maxWidth = `${bubbleWidthLimit(width)}px`;
+    const anchor =
+      bubbleAnchor && !bubbleAnchor.puppet.node.isDisposed()
+        ? bubbleAnchor.puppet.getNameplateScreenAnchor()
+        : null;
+    const preferred = anchor
+      ? anchor.x - container.getBoundingClientRect().left
+      : width * settings.beeX;
+    bubble.style.left = `${bubbleCenter(preferred, bubble.offsetWidth, width)}px`;
+  }
+  const resize = new ResizeObserver(() => {
+    placeBee();
+    placeBubble();
+  });
   resize.observe(container);
+  resize.observe(bubble);
 
   async function ensure(profile: Chatter): Promise<Entry | null> {
     const id = key(profile);
@@ -235,6 +255,7 @@ export function createStage(
     cleanupSpeech?.();
     cleanupSpeech = null;
     playing = false;
+    bubbleAnchor = undefined;
     bubble.hidden = true;
     for (const entry of entries.values()) void entry.puppet.shutup();
     bee?.animationGroups.find((a) => a.name === "talking")?.stop();
@@ -256,9 +277,20 @@ export function createStage(
     const audio = new Audio(url(`media/${mediaPath}`));
     activeAudio = audio;
     audio.muted = muted;
+    bubbleAnchor = entry;
     bubble.hidden = !settings.bubblesVisible;
-    bubble.textContent = event.text;
-    bubble.style.left = event.chatter ? "55%" : "22%";
+    const wordSpans = new Map<number, HTMLSpanElement>();
+    bubble.replaceChildren(
+      ...wordFragments(event.text, event.words).map((fragment) => {
+        if (fragment.word === null)
+          return document.createTextNode(fragment.text);
+        const span = document.createElement("span");
+        span.textContent = fragment.text;
+        wordSpans.set(fragment.word, span);
+        return span;
+      }),
+    );
+    placeBubble();
     let frame = 0;
     let speaking = false;
     let highlightedWord = -1;
@@ -282,15 +314,9 @@ export function createStage(
         }
       }
       if (event.words.length && current >= 0 && current !== highlightedWord) {
+        wordSpans.get(highlightedWord)?.classList.remove("current-word");
         highlightedWord = current;
-        bubble.replaceChildren(
-          ...event.words.map((w, i) => {
-            const span = document.createElement("span");
-            span.textContent = w.text + " ";
-            span.className = i === current ? "current-word" : "";
-            return span;
-          }),
-        );
+        wordSpans.get(current)?.classList.add("current-word");
       }
       frame = requestAnimationFrame(animate);
     };
@@ -304,6 +330,7 @@ export function createStage(
       activeAudio = null;
       cleanupSpeech = null;
       playing = false;
+      bubbleAnchor = undefined;
       bubble.hidden = true;
       void playNext();
     };

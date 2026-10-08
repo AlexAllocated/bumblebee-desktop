@@ -61,7 +61,10 @@
     position: absolute;
     bottom: 36%;
     transform: translateX(-50%);
-    max-width: 50%;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: calc(100% - 16px);
+    overflow-wrap: anywhere;
     z-index: 4;
     color: #202029;
     background: #fff9e8;
