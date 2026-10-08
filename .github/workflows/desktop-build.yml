@@ -2,6 +2,11 @@ name: Desktop installers
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'AGENTS.md'
   pull_request:
   workflow_dispatch:
 permissions:
