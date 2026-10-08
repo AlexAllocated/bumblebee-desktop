@@ -31,6 +31,11 @@
       pname = "bumblebee-desktop"; inherit version;
       src = pkgs.fetchurl { inherit url sha256; };
       extraPkgs = p: [ p.libsecret p.alsa-lib p.libayatana-appindicator p.libuuid p.llvmPackages.libcxx ];
+      # The AppImage supplies its own GLib. Desktop-session module overrides can
+      # otherwise load a newer NixOS GVfs module into that older bundled runtime.
+      profile = ''
+        unset GIO_MODULE_DIR GIO_EXTRA_MODULES
+      '';
       extraInstallCommands = ''
         install -Dm644 ${launcher}/share/applications/bumblebee-desktop.desktop $out/share/applications/bumblebee-desktop.desktop
         install -Dm644 ${./src-tauri/icons/128x128.png} $out/share/icons/hicolor/128x128/apps/bumblebee-desktop.png
