@@ -4,7 +4,13 @@ import { loadModel } from "./legacy/bumblebee/loadModel";
 import { createPuppet, type PuppetController } from "./legacy/puppet";
 import { screenToWorld } from "./legacy/utils/screenToWorld";
 import type { Chatter, OverlayEvent, OverlaySettings } from "../lib/types";
-import { bubbleCenter, bubbleWidthLimit, wordFragments } from "./bubbleLayout";
+import {
+  bubbleCenter,
+  bubbleWidthLimit,
+  bubbleHeightLimit,
+  wordFragments,
+  wordScrollTop,
+} from "./bubbleLayout";
 
 type Speech = Extract<OverlayEvent, { type: "speech" }>;
 type Entry = {
@@ -47,6 +53,7 @@ export function createStage(
   let playGeneration = 0;
   let cleanupSpeech: (() => void) | null = null;
   let bubbleAnchor: Entry | null | undefined;
+  let highlightedSpan: HTMLSpanElement | null = null;
   const queue: Speech[] = [];
   const received = new Set<string>();
   const bubble = document.createElement("div");
@@ -127,6 +134,7 @@ export function createStage(
     if (bubble.hidden || disposed) return;
     const width = container.clientWidth;
     bubble.style.maxWidth = `${bubbleWidthLimit(width)}px`;
+    bubble.style.maxHeight = `${bubbleHeightLimit(container.clientHeight)}px`;
     const anchor =
       bubbleAnchor && !bubbleAnchor.puppet.node.isDisposed()
         ? bubbleAnchor.puppet.getNameplateScreenAnchor()
@@ -135,6 +143,19 @@ export function createStage(
       ? anchor.x - container.getBoundingClientRect().left
       : width * settings.beeX;
     bubble.style.left = `${bubbleCenter(preferred, bubble.offsetWidth, width)}px`;
+    followHighlightedWord();
+  }
+  function followHighlightedWord() {
+    if (!highlightedSpan || bubble.hidden) return;
+    // Read layout only for a new word or a resize, rather than on every audio-clock frame.
+    const next = wordScrollTop(
+      bubble.scrollTop,
+      bubble.clientHeight,
+      bubble.scrollHeight,
+      highlightedSpan.offsetTop,
+      highlightedSpan.offsetHeight,
+    );
+    if (next !== bubble.scrollTop) bubble.scrollTop = next;
   }
   const resize = new ResizeObserver(() => {
     placeBee();
@@ -256,6 +277,7 @@ export function createStage(
     cleanupSpeech = null;
     playing = false;
     bubbleAnchor = undefined;
+    highlightedSpan = null;
     bubble.hidden = true;
     for (const entry of entries.values()) void entry.puppet.shutup();
     bee?.animationGroups.find((a) => a.name === "talking")?.stop();
@@ -278,6 +300,7 @@ export function createStage(
     activeAudio = audio;
     audio.muted = muted;
     bubbleAnchor = entry;
+    highlightedSpan = null;
     bubble.hidden = !settings.bubblesVisible;
     const wordSpans = new Map<number, HTMLSpanElement>();
     bubble.replaceChildren(
@@ -290,6 +313,7 @@ export function createStage(
         return span;
       }),
     );
+    bubble.scrollTop = 0;
     placeBubble();
     let frame = 0;
     let speaking = false;
@@ -316,7 +340,9 @@ export function createStage(
       if (event.words.length && current >= 0 && current !== highlightedWord) {
         wordSpans.get(highlightedWord)?.classList.remove("current-word");
         highlightedWord = current;
-        wordSpans.get(current)?.classList.add("current-word");
+        highlightedSpan = wordSpans.get(current) ?? null;
+        highlightedSpan?.classList.add("current-word");
+        followHighlightedWord();
       }
       frame = requestAnimationFrame(animate);
     };
@@ -331,6 +357,7 @@ export function createStage(
       cleanupSpeech = null;
       playing = false;
       bubbleAnchor = undefined;
+      highlightedSpan = null;
       bubble.hidden = true;
       void playNext();
     };

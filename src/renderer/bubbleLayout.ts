@@ -6,6 +6,32 @@ export function bubbleWidthLimit(viewportWidth: number) {
   );
 }
 
+/** The bubble sits 36% above the bottom; leave a gutter above the remaining space. */
+export function bubbleHeightLimit(viewportHeight: number) {
+  return Math.max(0, viewportHeight * 0.64 - 8);
+}
+
+/** Scroll the bubble itself, never the desktop page or the OBS document. */
+export function wordScrollTop(
+  current: number,
+  visibleHeight: number,
+  contentHeight: number,
+  wordTop: number,
+  wordHeight: number,
+) {
+  const padding = Math.min(8, visibleHeight / 2);
+  let next = current;
+  if (wordTop < current + padding || wordHeight > visibleHeight - padding * 2) {
+    next = wordTop - padding;
+  } else if (wordTop + wordHeight > current + visibleHeight - padding) {
+    next = wordTop + wordHeight - visibleHeight + padding;
+  }
+  return Math.max(
+    0,
+    Math.min(Math.max(0, contentHeight - visibleHeight), next),
+  );
+}
+
 export function bubbleCenter(
   preferred: number,
   measuredWidth: number,

@@ -64,7 +64,12 @@
     box-sizing: border-box;
     width: max-content;
     max-width: calc(100% - 16px);
+    max-height: calc(64% - 8px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
     overflow-wrap: anywhere;
+    white-space: pre-wrap;
     z-index: 4;
     color: #202029;
     background: #fff9e8;
@@ -77,6 +82,9 @@
     text-align: center;
   }
   :global(.speech-bubble[hidden]) {
+    display: none;
+  }
+  :global(.speech-bubble::-webkit-scrollbar) {
     display: none;
   }
   :global(.current-word) {
