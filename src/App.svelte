@@ -30,6 +30,12 @@
   let log: { time: string; text: string; sender: string }[] = $state([]);
   let statuses: ProviderStatus[] = $state([]);
   const subscribers = new Set<(event: OverlayEvent) => void>();
+  function rendererResult(error: unknown = null) {
+    if (isTauri())
+      void invoke("frontend_result", {
+        error: error == null ? null : String(error),
+      });
+  }
   const subscribe = (callback: (event: OverlayEvent) => void) => {
     subscribers.add(callback);
     if (snapshot)
@@ -344,6 +350,8 @@
                 {assetBase}
                 {subscribe}
                 muted={previewMuted}
+                onReady={() => rendererResult()}
+                onError={rendererResult}
               />{/key}{:else}<div class="unavailable">
               <img src="./bumblebee.png" alt="Bumblebee" />
               <p>Open Bumblebee as a desktop app to connect your stream.</p>

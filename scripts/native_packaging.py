@@ -47,16 +47,29 @@ def select_windows_crt(redist: Path) -> Path:
     return directory
 
 
-def bundle_windows_crt(output: Path):
+def windows_toolchain():
     vswhere = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
-    installation = subprocess.check_output([
-        str(vswhere), "-latest", "-version", "[17.0,18.0)", "-products", "*",
+    installations = json.loads(subprocess.check_output([
+        str(vswhere), "-latest", "-products", "*",
         "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-        "-property", "installationPath",
-    ], text=True).strip()
-    if not installation:
-        raise RuntimeError("Visual Studio 2022 C++ tools are required to package Windows x64")
-    directory = select_windows_crt(Path(installation) / "VC/Redist/MSVC")
+        "-format", "json", "-utf8",
+    ], encoding="utf-8"))
+    if not installations:
+        raise RuntimeError("Visual Studio C++ tools are required to package Windows x64")
+    installation = installations[0]
+    major = int(installation["installationVersion"].split(".")[0])
+    return Path(installation["installationPath"]), windows_generator(major)
+
+
+def windows_generator(major: int):
+    year = {17: 2022, 18: 2026}.get(major)
+    if year is None:
+        raise RuntimeError(f"Unsupported Visual Studio {major}; validate its toolchain and redistribution license first")
+    return f"Visual Studio {major} {year}"
+
+
+def bundle_windows_crt(output: Path, installation: Path, generator: str):
+    directory = select_windows_crt(installation / "VC/Redist/MSVC")
     application = output / "windows-runtime"
     application.mkdir(parents=True, exist_ok=True)
     for library in sorted(directory.glob("*.dll")):
@@ -66,8 +79,9 @@ def bundle_windows_crt(output: Path):
         shutil.copy2(library, application / library.name)
         shutil.copy2(library, output / "native" / library.name)
     (output / "native/msvc-runtime-origin.txt").write_text(
-        "Visual Studio 2022 release redistributables\n"
+        f"{generator} release redistributables\n"
         f"Version: {directory.parent.parent.name}\nArchitecture: x64\n"
         "Source: VC/Redist/MSVC/<version>/x64/Microsoft.VC*.CRT\n"
-        "License: msvc-RUNTIME-LICENSE.txt\n"
+        f"License: {'msvc-2026-RUNTIME-LICENSE.txt' if generator.endswith('2026') else 'msvc-RUNTIME-LICENSE.txt'}\n",
+        encoding="utf-8",
     )

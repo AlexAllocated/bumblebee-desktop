@@ -5,7 +5,7 @@ import struct
 import tempfile
 import unittest
 from unittest.mock import patch
-from native_packaging import assert_x64, select_windows_crt, write_manifest
+from native_packaging import assert_x64, select_windows_crt, windows_generator, windows_toolchain, write_manifest
 
 
 def module(name):
@@ -20,6 +20,14 @@ notices = module("collect-os-notices")
 
 
 class PackagingTests(unittest.TestCase):
+    def test_windows_toolchain_follows_the_installed_2026_runner(self):
+        data = json.dumps([{"installationPath": "C:/VS/2026", "installationVersion": "18.10.100"}])
+        with patch("native_packaging.subprocess.check_output", return_value=data):
+            self.assertEqual(windows_toolchain(), (Path("C:/VS/2026"), "Visual Studio 18 2026"))
+        self.assertEqual(windows_generator(17), "Visual Studio 17 2022")
+        with self.assertRaisesRegex(RuntimeError, "redistribution license"):
+            windows_generator(19)
+
     def test_rejects_wrong_binary_architecture_before_shipping(self):
         with tempfile.TemporaryDirectory() as folder:
             library = Path(folder) / "runtime.dll"

@@ -32,6 +32,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -68,6 +71,16 @@ jobs:
         run: |
           sudo apt-get install -y ./target/${{ matrix.target }}/release/bundle/deb/*.deb
           dbus-run-session -- xvfb-run -a bash scripts/linux-smoke-test.sh
+      - name: Smoke-test Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          appimage=(target/${{ matrix.target }}/release/bundle/appimage/*.AppImage)
+          test "${#appimage[@]}" -eq 1
+          chmod +x "${appimage[0]}"
+          dbus-run-session -- xvfb-run -a bash scripts/linux-smoke-test.sh "$(realpath "${appimage[0]}")"
       - name: Install and smoke-test Windows package
         if: runner.os == 'Windows'
         shell: pwsh

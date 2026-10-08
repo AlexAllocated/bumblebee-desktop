@@ -5,12 +5,35 @@ use futures_util::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
+/// Only the trusted desktop window can acknowledge this. Ordinary runs have no smoke state.
+#[tauri::command]
+pub fn frontend_result(state: tauri::State<'_, Arc<Runtime>>, error: Option<String>) {
+	if let Some(frontend) = &state.smoke_frontend {
+		frontend.send_replace(Some(error.map_or(Ok(()), Err)));
+	}
+}
+
 pub async fn run(state: Arc<Runtime>) -> Result<()> {
 	ensure!(state.overlay_error.is_none(), "OBS endpoint could not bind");
 	let temporary = std::env::temp_dir().join(format!("bumblebee-smoke-{}", uuid::Uuid::new_v4()));
 	std::fs::create_dir_all(&temporary)?;
 	let database = temporary.join("smoke.sqlite3");
 	let result = async {
+		let mut frontend = state
+			.smoke_frontend
+			.as_ref()
+			.context("Not an isolated smoke run")?
+			.subscribe();
+		tokio::time::timeout(
+			Duration::from_secs(60),
+			frontend.wait_for(|result| result.is_some()),
+		)
+		.await
+		.context("Desktop interface did not load its model and render a frame within 60 seconds")??
+		.as_ref()
+		.expect("waited for frontend result")
+		.as_ref()
+		.map_err(|error| anyhow::anyhow!("Desktop renderer failed: {error}"))?;
 		{
 			let store = bumblebee_core::storage::Store::open(&database)?;
 			store.set("smoke", &"persistent")?;

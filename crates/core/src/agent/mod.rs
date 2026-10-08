@@ -3,6 +3,8 @@ mod delivery;
 mod managed;
 mod model;
 pub mod platform_tools;
+#[cfg(feature = "live-probes")]
+pub mod probe;
 mod tools;
 
 use crate::{

@@ -100,19 +100,26 @@ export function createStage(
     }
     if (!settings.bubblesVisible) bubble.hidden = true;
   }
-  void loadModel({ scene, modelUrl: url("models/bumblebee.cb67e11b.glb") })
-    .then((model) => {
-      if (disposed) {
-        model.node.dispose();
-        return;
-      }
-      bee = model;
-      model.animationGroups.find((a) => a.name === "idleFlying")?.start(true);
-      placeBee();
-    })
-    .catch((error) => {
-      if (!disposed) console.error("Bumblebee model could not load", error);
-    });
+  const ready = loadModel({
+    scene,
+    modelUrl: url("models/bumblebee.cb67e11b.glb"),
+  }).then(async (model) => {
+    if (disposed) {
+      model.node.dispose();
+      throw new Error("Renderer was disposed before its model loaded");
+    }
+    bee = model;
+    model.animationGroups.find((a) => a.name === "idleFlying")?.start(true);
+    placeBee();
+    await scene.whenReadyAsync();
+    await new Promise<void>((resolve) =>
+      scene.onAfterRenderObservable.addOnce(() => resolve()),
+    );
+  });
+  // Keep failures visible even if the caller does not wait for readiness (for example OBS).
+  void ready.catch((error) => {
+    if (!disposed) console.error("Bumblebee model could not load", error);
+  });
   const resize = new ResizeObserver(placeBee);
   resize.observe(container);
 
@@ -317,6 +324,7 @@ export function createStage(
     }
   }
   return {
+    ready,
     async consume(event: OverlayEvent) {
       if (disposed) return;
       if (event.type === "overlay_settings") {

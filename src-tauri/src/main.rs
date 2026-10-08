@@ -33,6 +33,7 @@ struct Runtime {
 	quitting: AtomicBool,
 	overlay_error: Option<String>,
 	configuration: Mutex<()>,
+	smoke_frontend: Option<watch::Sender<Option<Result<(), String>>>>,
 }
 
 async fn shutdown_app(app: tauri::AppHandle, state: Arc<Runtime>) {
@@ -69,11 +70,6 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 		app.path().app_data_dir()?
 	};
 	std::fs::create_dir_all(&data)?;
-	if smoke_mode {
-		if let Some(window) = app.get_webview_window("main") {
-			window.hide()?;
-		}
-	}
 	for directory in ["images", "media"] {
 		std::fs::create_dir_all(data.join(directory))?;
 	}
@@ -159,6 +155,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 		quitting: AtomicBool::new(false),
 		overlay_error,
 		configuration: Mutex::new(()),
+		smoke_frontend: smoke_mode.then(|| watch::channel(None).0),
 	});
 	app.manage(state.clone());
 	if smoke_mode {
@@ -170,7 +167,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 				1
 			} else {
 				println!(
-					"Installed-package smoke test passed: SQLite, keyring, native libraries, loopback assets."
+					"Installed-package smoke test passed: SQLite, keyring, native libraries, loopback assets, Svelte interface and rendered bee model."
 				);
 				0
 			};
@@ -233,6 +230,7 @@ fn main() {
 		.plugin(tauri_plugin_opener::init())
 		.plugin(tauri_plugin_autostart::Builder::new().build())
 		.invoke_handler(tauri::generate_handler![
+			smoke::frontend_result,
 			commands::get_snapshot,
 			commands::save_overlay_settings,
 			commands::get_activity,

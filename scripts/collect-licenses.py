@@ -25,7 +25,7 @@ def notices(directory):
 
 
 def main():
-    supplements = json.loads((ROOT / "licenses/supplemental.json").read_text())
+    supplements = json.loads((ROOT / "licenses/supplemental.json").read_text(encoding="utf-8"))
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1"], cwd=ROOT
     ))
@@ -42,7 +42,7 @@ def main():
         if package.get("license_file"):
             path = directory / package["license_file"]
             if path.name not in {name for name, _ in entries}:
-                entries.append((path.name, path.read_text()))
+                entries.append((path.name, path.read_text(encoding="utf-8-sig")))
         identifier = f"Rust: {package['name']} {package['version']}"
         if not entries:
             missing.append(identifier)
@@ -57,7 +57,7 @@ def main():
             continue
         path = Path(directory)
         try:
-            package = json.loads((path / "package.json").read_text())
+            package = json.loads((path / "package.json").read_text(encoding="utf-8-sig"))
         except (ValueError, UnicodeError):
             continue
         name, version = package.get("name"), package.get("version")
@@ -75,7 +75,7 @@ def main():
 
     lines = ["Bumblebee dependency license notices", "", "Includes resolved build/test dependencies as well as application dependencies.", ""]
     for filename in ("LICENSE", "ASSETS.md", "THIRD_PARTY_NOTICES.md"):
-        lines.extend([f"===== Bumblebee: {filename} =====", (ROOT / filename).read_text(), ""])
+        lines.extend([f"===== Bumblebee: {filename} =====", (ROOT / filename).read_text(encoding="utf-8"), ""])
     for path in sorted((ROOT / "crates/audio/native").iterdir()):
         if path.is_file() and any(word in path.name.lower() for word in ("license", "notice", "redist")):
             # Microsoft's NuGet license is Windows-1252; retain its characters.
@@ -88,7 +88,7 @@ def main():
         if not entries:
             lines.append("No standalone license document was included in the dependency archive; see its declared license and source above.\n")
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text("\n".join(lines))
+    OUTPUT.write_text("\n".join(lines), encoding="utf-8")
     print(f"Collected notices for {len(sections)} resolved packages into {OUTPUT.relative_to(ROOT)}")
     if missing:
         print("Dependencies without a standalone notice file:")

@@ -45,3 +45,15 @@ SQLite migrations are versioned and transactional. An unknown newer schema is re
 `cargo test -p bumblebee-core --lib` exercises the actual shared loop using controlled model/provider boundaries: ordered multi-step calls, restart-safe confirmations, changed permissions, rejection, cancellation after dispatch, new-call-ID uncertainty guards, malformed terminal output, private history and reminder interruption. Local HTTP tests cover provider rejection versus ambiguous acknowledgment, truncation and cancellation after receipt. Storage tests cover migration preservation, request ordering, image approval visibility and cache corruption/expiry/eviction.
 
 These tests do not establish live OAuth permission behavior, live Discord/Twitch/YouTube mutations, live OpenAI research/image/code execution, real-user reminder delivery, or packaged OBS/audio behavior. Those require separately observed integration checks with the user's configured providers. Unknown provider outcomes require inspection; the application does not offer a general force-retry override.
+
+## Opt-in live Responses probe
+
+The `agent_probe` example verifies the actual Responses request, full native function catalog, strict final parser, shared turn loop and durable SQLite result against a selected model. It uses an isolated temporary database and an OpenAI-only credential adapter. Its delivery boundary accepts only a silent local source and stores the final greeting locally; every other tool executor, audio delivery, external destination and confirmation prompt is rejected. It never starts the application engine or platform connections. The example also reopens SQLite to verify persistence, then removes its temporary data.
+
+Load the saved OpenAI key into the child process environment as `BUMBLEBEE_AGENT_PROBE_KEY`, without printing it or placing it in shell arguments. Then run explicitly:
+
+```sh
+cargo run -p bumblebee-core --features live-probes --example agent_probe -- gpt-5.4-mini
+```
+
+The model argument is required, and availability is checked with the same credential before inference. The current [GPT-5.4 Mini documentation](https://developers.openai.com/api/docs/models/gpt-5.4-mini) lists Responses, function calling and structured output support. This probe does not set a model in application Settings. It permits at most three model requests and a 90-second turn; it is not run in CI and is absent from normal builds unless the `live-probes` feature is enabled.

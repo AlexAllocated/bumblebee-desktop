@@ -1,5 +1,5 @@
 use super::{Checkpoint, FinalReply, ToolCall, ToolDefinition};
-use crate::runtime::Engine;
+use crate::{providers::Providers, runtime::Engine};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -23,6 +23,16 @@ pub async fn request(
 	owner: bool,
 	cancel: CancellationToken,
 ) -> Result<Value> {
+	request_with_providers(&engine.providers, cp, defs, owner, cancel).await
+}
+
+pub(super) async fn request_with_providers(
+	providers: &Providers,
+	cp: &Checkpoint,
+	defs: &[ToolDefinition],
+	owner: bool,
+	cancel: CancellationToken,
+) -> Result<Value> {
 	let policy = format!(
 		"{INSTRUCTIONS}\nCurrent UTC time: {}. Current Unix milliseconds: {}. Verified owner: {owner}. Source: {}. For a voice source, default speech on unless the request specifies silence or private-only delivery.",
 		chrono::Utc::now().to_rfc3339(),
@@ -40,7 +50,7 @@ pub async fn request(
 	if cp.delivery.is_none() {
 		body["tool_choice"] = json!({"type":"function","name":"configureTurnDelivery"});
 	}
-	send_response(engine, &body, cancel).await
+	send_response_with_providers(providers, &body, cancel).await
 }
 
 pub async fn send_response(
@@ -48,8 +58,16 @@ pub async fn send_response(
 	body: &Value,
 	cancel: CancellationToken,
 ) -> Result<Value> {
+	send_response_with_providers(&engine.providers, body, cancel).await
+}
+
+async fn send_response_with_providers(
+	providers: &Providers,
+	body: &Value,
+	cancel: CancellationToken,
+) -> Result<Value> {
 	ensure!(!cancel.is_cancelled(), "OpenAI request cancelled");
-	let response = tokio::select! {biased;_=cancel.cancelled()=>bail!("OpenAI request cancelled"),response=engine.providers.http.post("https://api.openai.com/v1/responses").bearer_auth(engine.providers.secret("openai")?).timeout(Duration::from_secs(300)).json(body).send()=>response.context("Cannot reach OpenAI")?};
+	let response = tokio::select! {biased;_=cancel.cancelled()=>bail!("OpenAI request cancelled"),response=providers.http.post("https://api.openai.com/v1/responses").bearer_auth(providers.secret("openai")?).timeout(Duration::from_secs(300)).json(body).send()=>response.context("Cannot reach OpenAI")?};
 	crate::providers::check_response("openai", &response)?;
 	ensure!(
 		response

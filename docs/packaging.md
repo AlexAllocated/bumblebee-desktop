@@ -16,7 +16,7 @@ bun run desktop
 
 The first production build can take several minutes. `bun tauri build --bundles nsis` builds Windows; `bun tauri build --bundles deb,appimage` builds Linux. A Linux AppImage should be built on the oldest supported Linux runner (currently Ubuntu 24.04). NixOS uses the flake development environment for source builds and `appimageTools` for released AppImages, not a generic unwrapped AppImage.
 
-Windows builds require Visual Studio 2022's C++ tools and release x64 redistributables. Native preparation validates the binary architecture and includes the VC runtime beside both the executable and Speech wrapper. It does not rely on Visual Studio or a separately installed VC runtime on the viewer's machine. These app-local libraries receive security updates through new Bumblebee installers.
+Windows builds require Visual Studio 2022 or 2026 C++ tools and release x64 redistributables. Native preparation discovers the installed toolchain rather than assuming the runner's Visual Studio generation. Native preparation validates the binary architecture and includes the VC runtime beside both the executable and Speech wrapper. It does not rely on Visual Studio or a separately installed VC runtime on the viewer's machine. These app-local libraries receive security updates through new Bumblebee installers.
 
 On the Ubuntu release builder, run `python scripts/bundle-linux-native.py` after native preparation, then `python scripts/collect-os-notices.py` after the ordinary license collector. The workflow does this automatically. This explicitly includes TEN's C++ runtime and the Speech SDK's dynamic dependencies, because an AppImage dependency scan can miss libraries loaded from resource paths. Native libraries use `$ORIGIN`; the host still supplies the base glibc ABI. The generated package notices preserve installed copyright documents, common license texts, and exact source-package versions. The notices are build evidence, not a claim that redistribution/source obligations for every bundled dependency have received a legal review.
 
@@ -40,7 +40,7 @@ Use the actual release asset filename. This example does not claim that the rele
 
 ## Installation and upgrade checks
 
-`bumblebee-desktop --smoke-test` tests the installed package using temporary SQLite and keyring entries, checks native library loading, and fetches the packaged renderer through loopback. It exits with a nonzero status on failure. This does not test live provider permissions, Discord voice, OBS capture, or a complete streaming session.
+`bumblebee-desktop --smoke-test` tests the installed package using temporary SQLite and keyring entries, checks native library loading, fetches packaged assets and exercises WebSocket delivery and revocation through loopback. The native webview must load the Svelte interface, load the bee model and render a frame within 60 seconds. Linux CI runs this against both the installed Debian executable and the AppImage (using its extraction runtime, without requiring FUSE). It exits with a nonzero status on failure. This does not replace visual inspection or test live provider permissions, Discord voice, OBS capture, or a complete streaming session.
 
 Install an upgrade over the existing version and verify settings, profiles, memories, reminders and approved images remain available. Data lives in the OS application-data directory (`buzz.bumblebee.desktop`); secrets live in the OS keyring. Uninstalling or upgrading the executable must not migrate credentials into plain files.
 

@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import urllib.request
 import zipfile
-from native_packaging import assert_x64, bundle_windows_crt, write_manifest
+from native_packaging import assert_x64, bundle_windows_crt, windows_toolchain, write_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_VERSION = "1.50.0"
@@ -69,7 +69,8 @@ def prepare(output: Path):
             shutil.rmtree(folder)
     native_output.mkdir(parents=True, exist_ok=True)
     build = work / "build"
-    generator = ["-G", "Visual Studio 17 2022", "-A", "x64"] if system == "Windows" else []
+    toolchain = windows_toolchain() if system == "Windows" else None
+    generator = ["-G", toolchain[1], "-A", "x64", f"-DCMAKE_GENERATOR_INSTANCE={toolchain[0]}"] if toolchain else []
     subprocess.run(["cmake", *generator, "-S", str(ROOT / "crates/audio/native"), "-B", str(build),
                     f"-DSPEECH_SDK_ROOT={sdk}", "-DCMAKE_BUILD_TYPE=Release",
                     f"-DCMAKE_INSTALL_PREFIX={native_output}"], check=True)
@@ -87,7 +88,7 @@ def prepare(output: Path):
         raise SystemExit("TEN VAD binary checksum mismatch")
     shutil.copy2(ten_binary, native_output / ten_binary.name)
     if system == "Windows":
-        bundle_windows_crt(output)
+        bundle_windows_crt(output, *toolchain)
     for library in native_output.iterdir():
         if library.suffix in (".dll", ".so"):
             assert_x64(library)
