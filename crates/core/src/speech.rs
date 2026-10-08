@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 pub struct Speech {
 	cache: Arc<SpeechCache>,
 	media: PathBuf,
+	media_publication: Arc<tokio::sync::Mutex<()>>,
 	providers: Arc<Providers>,
 }
 pub struct PreparedSpeech {
@@ -31,6 +32,7 @@ impl Speech {
 		Ok(Self {
 			cache,
 			media,
+			media_publication: Arc::new(tokio::sync::Mutex::new(())),
 			providers,
 		})
 	}
@@ -96,22 +98,21 @@ impl Speech {
 		};
 		let duration_ms = wav_duration_ms(&speech.audio)?;
 		let filename = format!("{key}.wav");
-		let path = self.media.join(&filename);
-		if !path.is_file() {
-			let temporary = self.media.join(format!("{}.tmp", uuid::Uuid::new_v4()));
-			tokio::fs::write(&temporary, &speech.audio).await?;
-			if let Err(error) = tokio::fs::rename(&temporary, &path).await {
-				let _ = tokio::fs::remove_file(&temporary).await;
-				if !path.is_file() {
-					return Err(error.into());
-				}
-			}
-		}
+		// A second preparation must not prune a reused file between its existence
+		// check and renewal for the overlay's next HTTP request.
+		let publication = self.media_publication.clone().lock_owned().await;
 		// HTTP media is disposable, independent of the bounded speech cache. Keep only
 		// recent files so OBS can fetch a completed clip without indefinite disk growth.
 		let media = self.media.clone();
 		let current = filename.clone();
-		tokio::task::spawn_blocking(move || prune_media(&media, &current)).await??;
+		let audio = speech.audio.clone();
+		tokio::task::spawn_blocking(move || {
+			// Keep ownership inside the task: cancelling prepare cannot release the
+			// lock while its non-cancellable filesystem work is still running.
+			let _publication = publication;
+			publish_media(&media, &current, &audio)
+		})
+		.await??;
 		Ok(PreparedSpeech {
 			wav: speech.audio,
 			words: speech.words,
@@ -120,12 +121,36 @@ impl Speech {
 		})
 	}
 }
+fn publish_media(dir: &std::path::Path, current: &str, audio: &[u8]) -> Result<()> {
+	let path = dir.join(current);
+	if !path.is_file() {
+		let temporary = dir.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+		std::fs::write(&temporary, audio)?;
+		if let Err(error) = std::fs::rename(&temporary, &path) {
+			let _ = std::fs::remove_file(&temporary);
+			if !path.is_file() {
+				return Err(error.into());
+			}
+		}
+	}
+	prune_media(dir, current)
+}
 fn prune_media(dir: &std::path::Path, current: &str) -> Result<()> {
+	// Cache hits reuse the same immutable WAV. Renew its media lifetime as well
+	// as its cache lifetime, or the next clip could remove it before OBS fetches it.
+	std::fs::File::options()
+		.write(true)
+		.open(dir.join(current))?
+		.set_modified(std::time::SystemTime::now())?;
 	let mut total = 0u64;
 	let mut entries = Vec::new();
 	for entry in std::fs::read_dir(dir)? {
 		let entry = entry?;
-		let metadata = entry.metadata()?;
+		let metadata = match entry.metadata() {
+			Ok(metadata) => metadata,
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+			Err(error) => return Err(error.into()),
+		};
 		if !metadata.is_file() {
 			continue;
 		}
@@ -138,7 +163,11 @@ fn prune_media(dir: &std::path::Path, current: &str) -> Result<()> {
 		if path.file_name().and_then(|s| s.to_str()) != Some(current)
 			&& (old || total > 128 * 1024 * 1024)
 		{
-			std::fs::remove_file(path)?;
+			match std::fs::remove_file(path) {
+				Ok(()) => {}
+				Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+				Err(error) => return Err(error.into()),
+			}
 			total = total.saturating_sub(size);
 		}
 	}
@@ -212,6 +241,28 @@ fn wav_duration_ms(bytes: &[u8]) -> Result<u64> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn cached_wav_reuse_renews_the_overlay_file_before_the_next_clip_prunes() {
+		let directory = tempfile::tempdir().unwrap();
+		let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3601);
+		for name in ["reused.wav", "expired.wav"] {
+			let path = directory.path().join(name);
+			std::fs::write(&path, b"immutable audio bytes").unwrap();
+			std::fs::File::options()
+				.write(true)
+				.open(path)
+				.unwrap()
+				.set_modified(old)
+				.unwrap();
+		}
+		publish_media(directory.path(), "reused.wav", b"immutable audio bytes").unwrap();
+		publish_media(directory.path(), "next.wav", b"next clip").unwrap();
+		assert_eq!(
+			std::fs::read(directory.path().join("reused.wav")).unwrap(),
+			b"immutable audio bytes"
+		);
+		assert!(!directory.path().join("expired.wav").exists());
+	}
 	#[test]
 	fn ssml_escapes_untrusted_chat() {
 		let voice = crate::catalog::voices()
