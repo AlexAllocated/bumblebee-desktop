@@ -96,7 +96,15 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
           $stdout = Join-Path $env:RUNNER_TEMP 'bumblebee-smoke.stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'bumblebee-smoke.stderr.log'
-          $smoke = Start-Process -FilePath "$installDir/bumblebee-desktop.exe" -ArgumentList '--smoke-test' -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'BumblebeeSmokeWorkingDirectory'
+          New-Item -ItemType Directory -Path $smokeDir -Force | Out-Null
+          $buildPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+            $smoke = Start-Process -FilePath "$installDir/bumblebee-desktop.exe" -WorkingDirectory $smokeDir -ArgumentList '--smoke-test' -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          } finally {
+            $env:PATH = $buildPath
+          }
           $finished = $smoke.WaitForExit(120000)
           if (-not $finished) {
             $smoke.Kill($true)

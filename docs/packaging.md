@@ -42,6 +42,8 @@ Use the actual release asset filename. This example does not claim that the rele
 
 `bumblebee-desktop --smoke-test` tests the installed package using temporary SQLite and keyring entries, checks native library loading, fetches packaged assets and exercises WebSocket delivery and revocation through loopback. The native webview must load the Svelte interface, load the bee model and render a frame within 60 seconds. Linux CI runs this against both the installed Debian executable and the AppImage (using its extraction runtime, without requiring FUSE). It exits with a nonzero status on failure. This does not replace visual inspection or test live provider permissions, Discord voice, OBS capture, or a complete streaming session.
 
+The Windows CI smoke runs from an empty temporary working directory with a PATH containing only standard Windows directories, so it cannot find native resources through the checkout or development-tool paths. Its installer and application processes have bounded timeouts, and application output is captured in the job log. The hosted Windows runner still has development tools and system runtimes installed; this is installed-package evidence, not a pristine Windows-machine acceptance claim.
+
 Install an upgrade over the existing version and verify settings, profiles, memories, reminders and approved images remain available. Data lives in the OS application-data directory (`buzz.bumblebee.desktop`); secrets live in the OS keyring. Uninstalling or upgrading the executable must not migrate credentials into plain files.
 
 Check `docs/verification.md` for the actual tested boundaries before calling a build a release candidate.
