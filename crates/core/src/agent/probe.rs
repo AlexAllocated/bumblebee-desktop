@@ -138,6 +138,7 @@ pub async fn run(providers: Arc<Providers>, model_id: &str) -> Result<ProbeRepor
 		delivery: None,
 		artifacts: vec![],
 		pending: None,
+		reply_route: None,
 		answer: None,
 		approved_call: None,
 		voice_channel_id: None,

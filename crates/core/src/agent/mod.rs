@@ -57,6 +57,18 @@ pub struct Artifact {
 	pub media_type: String,
 	pub label: String,
 }
+/// The transport allowed to answer a saved question. This never changes the turn's actor.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplyRoute {
+	Source,
+	Dashboard,
+	DiscordDm {
+		user_id: String,
+		channel_id: String,
+		owner_link: bool,
+	},
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
 	pub id: String,
@@ -70,6 +82,8 @@ pub struct Checkpoint {
 	pub delivery: Option<Delivery>,
 	pub artifacts: Vec<Artifact>,
 	pub pending: Option<PendingInput>,
+	#[serde(default)]
+	pub reply_route: Option<ReplyRoute>,
 	pub answer: Option<String>,
 	pub approved_call: Option<String>,
 	#[serde(default)]
@@ -119,30 +133,103 @@ pub(super) async fn require_owner(engine: &Engine, source: &ChatMessage) -> Resu
 	Ok(())
 }
 
-pub fn pending_for_message(store: &Store, message: &ChatMessage) -> Result<bool> {
-	Ok(store
-		.pending_inputs()?
-		.iter()
-		.any(|p| p.actor == durable::actor(message) && p.channel == durable::channel(message)))
+/// Only trusted desktop IPC creates this reserved platform. Provider adapters use fixed names.
+pub fn is_desktop_answer(message: &ChatMessage) -> bool {
+	message.platform == "desktop_answer" && message.user_id == "owner"
 }
-pub fn desktop_answer_message(store: &Store, id: &str, answer: &str) -> Result<ChatMessage> {
-	let pending = store
+fn matches_reply(store: &Store, pending: &PendingInput, message: &ChatMessage) -> Result<bool> {
+	if is_desktop_answer(message) {
+		return Ok(message.channel_id == pending.id);
+	}
+	// Most chat messages cannot answer this request; avoid loading unrelated saved model context.
+	let original =
+		pending.actor == durable::actor(message) && pending.channel == durable::channel(message);
+	let possible_dm = message.platform == "discord"
+		&& (pending.actor == durable::actor(message)
+			|| message.user_id == store.settings()?.owner_discord_id);
+	if !original && !possible_dm {
+		return Ok(false);
+	}
+	let checkpoint = store.turn(&pending.turn_id)?.checkpoint;
+	let route: Option<ReplyRoute> = checkpoint
+		.get("reply_route")
+		.filter(|v| !v.is_null())
+		.map(|v| serde_json::from_value(v.clone()))
+		.transpose()?;
+	Ok(match route.as_ref().unwrap_or(&ReplyRoute::Source) {
+		ReplyRoute::Dashboard => false,
+		ReplyRoute::Source => {
+			pending.actor == durable::actor(message) && pending.channel == durable::channel(message)
+		}
+		ReplyRoute::DiscordDm {
+			user_id,
+			channel_id,
+			owner_link,
+		} => {
+			message.platform == "discord"
+				&& &message.user_id == user_id
+				&& &message.channel_id == channel_id
+				&& (!owner_link || store.settings()?.owner_discord_id == *user_id)
+		}
+	})
+}
+fn matching_pending(store: &Store, message: &ChatMessage) -> Result<Vec<PendingInput>> {
+	store
 		.pending_inputs()?
 		.into_iter()
-		.find(|p| p.id == id)
-		.context("This question expired or was already answered")?;
-	let cp: Checkpoint = serde_json::from_value(store.turn(&pending.turn_id)?.checkpoint)?;
-	let mut source = cp.source;
-	source.message_id = uuid::Uuid::new_v4().to_string();
-	source.text = format!("!answer {id} {answer}");
-	// A private prompt can be answered in its actual DM destination.
-	if let Some(channel) = pending
-		.channel
-		.strip_prefix(&format!("{}:", durable::platform(&source.platform)))
-	{
-		source.channel_id = channel.into();
-	}
-	Ok(source)
+		.filter_map(|p| match matches_reply(store, &p, message) {
+			Ok(true) => Some(Ok(p)),
+			Ok(false) => None,
+			Err(e) => Some(Err(e)),
+		})
+		.collect()
+}
+pub fn pending_for_message(store: &Store, message: &ChatMessage) -> Result<bool> {
+	Ok(!matching_pending(store, message)?.is_empty())
+}
+pub fn pending_actor_for_message(store: &Store, message: &ChatMessage) -> Result<Option<String>> {
+	let candidates = matching_pending(store, message)?;
+	let code = message
+		.text
+		.trim()
+		.strip_prefix("!answer ")
+		.and_then(|s| s.split_whitespace().next());
+	Ok(candidates
+		.iter()
+		.find(|p| code.is_some_and(|id| p.id.eq_ignore_ascii_case(id)))
+		.or_else(|| (candidates.len() == 1).then(|| &candidates[0]))
+		.map(|p| p.actor.clone()))
+}
+pub fn pending_to_cancel(store: &Store, message: &ChatMessage) -> Result<Vec<PendingInput>> {
+	store
+		.pending_inputs()?
+		.into_iter()
+		.filter_map(|p| {
+			if p.actor == durable::actor(message) && p.channel == durable::channel(message) {
+				return Some(Ok(p));
+			}
+			match matches_reply(store, &p, message) {
+				Ok(true) => Some(Ok(p)),
+				Ok(false) => None,
+				Err(e) => Some(Err(e)),
+			}
+		})
+		.collect()
+}
+pub fn desktop_answer_message(store: &Store, id: &str, answer: &str) -> Result<ChatMessage> {
+	ensure!(
+		store.pending_inputs()?.iter().any(|p| p.id == id),
+		"This question expired or was already answered"
+	);
+	Ok(ChatMessage {
+		platform: "desktop_answer".into(),
+		user_id: "owner".into(),
+		display_name: "Streamer".into(),
+		message_id: uuid::Uuid::new_v4().to_string(),
+		channel_id: id.into(),
+		text: format!("!answer {id} {answer}"),
+		is_owner: true,
+	})
 }
 pub async fn run(
 	engine: Arc<Engine>,
@@ -154,6 +241,10 @@ pub async fn run(
 	if resume(&host, &message, cancel.clone()).await? {
 		return Ok(());
 	}
+	ensure!(
+		!is_desktop_answer(&message),
+		"This question expired or was already answered"
+	);
 	ensure!(
 		host.engine.store.settings()?.ai_enabled,
 		"AI is disabled in Settings"
@@ -179,6 +270,7 @@ pub async fn run(
 		delivery: None,
 		artifacts: vec![],
 		pending: None,
+		reply_route: None,
 		answer: None,
 		approved_call: None,
 		voice_channel_id,
@@ -203,6 +295,21 @@ pub async fn handle_pending(
 }
 
 trait Host: Sync {
+	fn reply_route(
+		&self,
+		cp: &Checkpoint,
+		_owner: bool,
+	) -> impl Future<Output = Result<ReplyRoute>> + Send {
+		async {
+			Ok(
+				if cp.delivery.as_ref().is_some_and(|d| d.targets.is_empty()) {
+					ReplyRoute::Dashboard
+				} else {
+					ReplyRoute::Source
+				},
+			)
+		}
+	}
 	fn store(&self) -> &Store;
 	fn definitions(&self) -> Vec<ToolDefinition>;
 	fn owner(&self, source: &ChatMessage) -> impl Future<Output = Result<bool>> + Send;
@@ -237,6 +344,9 @@ struct RuntimeHost {
 	engine: Arc<Engine>,
 }
 impl Host for RuntimeHost {
+	async fn reply_route(&self, cp: &Checkpoint, owner: bool) -> Result<ReplyRoute> {
+		delivery::reply_route(&self.engine, cp, owner).await
+	}
 	fn store(&self) -> &Store {
 		&self.engine.store
 	}
@@ -302,12 +412,7 @@ async fn resume<H: Host>(
 	cancel: CancellationToken,
 ) -> Result<bool> {
 	ensure!(!cancel.is_cancelled(), "Request cancelled before answering");
-	let candidates: Vec<_> = host
-		.store()
-		.pending_inputs()?
-		.into_iter()
-		.filter(|p| p.actor == durable::actor(message) && p.channel == durable::channel(message))
-		.collect();
+	let candidates = matching_pending(host.store(), message)?;
 	if candidates.is_empty() {
 		return Ok(false);
 	}
@@ -339,6 +444,17 @@ async fn resume<H: Host>(
 		!cancel.is_cancelled(),
 		"Request cancelled after permission check"
 	);
+	if let Some(ReplyRoute::DiscordDm {
+		user_id,
+		owner_link: true,
+		..
+	}) = &cp.reply_route
+	{
+		ensure!(
+			owner && host.store().settings()?.owner_discord_id == *user_id,
+			"The linked streamer identity changed; this private request cannot continue"
+		);
+	}
 	if matches!(
 		answer.to_ascii_lowercase().as_str(),
 		"cancel" | "never mind" | "!cancel"
@@ -374,8 +490,8 @@ async fn resume<H: Host>(
 	);
 	host.store().consume_pending(
 		&pending.id,
-		&durable::actor(message),
-		&durable::channel(message),
+		&pending.actor,
+		&pending.channel,
 		owner,
 		&resolved,
 		&serde_json::to_value(&cp)?,
@@ -455,23 +571,15 @@ async fn drive<H: Host>(host: &H, cp: &mut Checkpoint, cancel: CancellationToken
 						.map(|v| v.as_str().context("Invalid choice").map(str::to_owned))
 						.collect::<Result<Vec<_>>>()?
 				};
-				let channel = cp
-					.delivery
-					.as_ref()
-					.and_then(|d| {
-						if d.targets.iter().any(|t| t == "discord_dm") {
-							d.dm_channel.as_deref()
-						} else {
-							None
-						}
-					})
-					.map(|c| format!("discord:{c}"))
-					.unwrap_or_else(|| durable::channel(&cp.source));
+				cp.reply_route = Some(tokio::select! { biased;
+					 _=cancel.cancelled()=>bail!("Request cancelled before choosing a prompt destination"),
+					 result=host.reply_route(cp,owner)=>result?,
+				});
 				let pending = PendingInput {
 					id: uuid::Uuid::new_v4().simple().to_string()[..8].into(),
 					turn_id: cp.id.clone(),
 					actor: durable::actor(&cp.source),
-					channel,
+					channel: durable::channel(&cp.source),
 					kind: if confirmation {
 						"confirmation"
 					} else {

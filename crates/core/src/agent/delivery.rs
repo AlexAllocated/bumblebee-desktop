@@ -1,4 +1,6 @@
-use super::{Artifact, Checkpoint, Delivery, FinalReply, platform_tools::UncertainOutcome};
+use super::{
+	Artifact, Checkpoint, Delivery, FinalReply, ReplyRoute, platform_tools::UncertainOutcome,
+};
 use crate::{
 	agent_storage::PendingInput,
 	model::{ChatMessage, OverlayEvent},
@@ -65,6 +67,86 @@ pub async fn configure(engine: &Engine, cp: &Checkpoint, args: &Value) -> Result
 	Ok(delivery)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PromptDestination {
+	Source,
+	Dashboard,
+	RequesterDm { user_id: String, owner_link: bool },
+}
+fn prompt_destination(
+	source: &ChatMessage,
+	delivery: &Delivery,
+	owner: bool,
+	owner_discord_id: &str,
+) -> PromptDestination {
+	if delivery.targets.is_empty() {
+		return PromptDestination::Dashboard;
+	}
+	if delivery.targets.iter().any(|t| t == "discord_dm") {
+		// Final delivery to somebody else does not give them the requester's authority.
+		if crate::agent_storage::platform(&source.platform) == "discord" {
+			return PromptDestination::RequesterDm {
+				user_id: source.user_id.clone(),
+				owner_link: false,
+			};
+		}
+		if owner && !owner_discord_id.is_empty() {
+			return PromptDestination::RequesterDm {
+				user_id: owner_discord_id.into(),
+				owner_link: true,
+			};
+		}
+		// No verified cross-platform identity: keep the question in trusted local UI.
+		return PromptDestination::Dashboard;
+	}
+	if delivery.targets.iter().any(|t| t == "source") {
+		PromptDestination::Source
+	} else {
+		PromptDestination::Dashboard
+	}
+}
+pub(super) async fn reply_route(
+	engine: &Engine,
+	cp: &Checkpoint,
+	owner: bool,
+) -> Result<ReplyRoute> {
+	let policy = cp.delivery.as_ref().context("Delivery is not configured")?;
+	Ok(
+		match prompt_destination(
+			&cp.source,
+			policy,
+			owner,
+			&engine.store.settings()?.owner_discord_id,
+		) {
+			PromptDestination::Dashboard => ReplyRoute::Dashboard,
+			PromptDestination::Source => ReplyRoute::Source,
+			PromptDestination::RequesterDm {
+				user_id,
+				owner_link,
+			} => {
+				let channel = if policy.discord_dm_user_id.as_deref() == Some(user_id.as_str()) {
+					policy.dm_channel.clone()
+				} else {
+					None
+				};
+				let channel = match channel {
+					Some(channel) => Ok(channel),
+					None => create_dm(engine, &user_id).await,
+				};
+				match channel {
+					Ok(channel_id) => ReplyRoute::DiscordDm {
+						user_id,
+						channel_id,
+						owner_link,
+					},
+					// A failed private route must never fall back to a public prompt.
+					Err(_) => ReplyRoute::Dashboard,
+				}
+			}
+		},
+	)
+}
+
 pub async fn prompt(
 	engine: &Engine,
 	cp: &Checkpoint,
@@ -81,16 +163,24 @@ pub async fn prompt(
 		pending.prompt, choices, pending.id
 	);
 	let policy = cp.delivery.as_ref().context("Delivery is not configured")?;
-	if policy.targets.iter().any(|t| t == "discord_dm") {
-		let channel = policy
-			.dm_channel
-			.as_deref()
-			.context("Private destination is unavailable")?;
-		send_discord(engine, channel, &text, &[]).await?;
-	} else {
-		engine.send_message(&cp.source, &text).await?;
-		if policy.speech && cp.source.platform == "discord_voice" {
-			engine.speak(&text, None, cancel).await?;
+	match cp
+		.reply_route
+		.as_ref()
+		.context("Pending reply route is missing")?
+	{
+		ReplyRoute::Dashboard => {} // The durable pending record is already visible in the desktop UI.
+		ReplyRoute::DiscordDm { channel_id, .. } => {
+			send_discord(engine, channel_id, &text, &[]).await?;
+		}
+		ReplyRoute::Source => {
+			ensure!(
+				policy.targets.iter().any(|t| t == "source"),
+				"Public prompts are not permitted by this delivery policy"
+			);
+			engine.send_message(&cp.source, &text).await?;
+			if policy.speech && cp.source.platform == "discord_voice" {
+				engine.speak(&text, None, cancel).await?;
+			}
 		}
 	}
 	Ok(())
@@ -402,4 +492,72 @@ pub async fn load_artifact(engine: &Engine, artifact: &Artifact) -> Result<Uploa
 		media_type: artifact.media_type.clone(),
 		bytes: tokio::fs::read(path).await?,
 	})
+}
+
+#[cfg(test)]
+mod routing_tests {
+	use super::*;
+	fn source(platform: &str) -> ChatMessage {
+		ChatMessage {
+			platform: platform.into(),
+			user_id: "123".into(),
+			channel_id: "10".into(),
+			display_name: "Requester".into(),
+			message_id: "request".into(),
+			text: "private request".into(),
+			is_owner: true,
+		}
+	}
+	fn private() -> Delivery {
+		Delivery {
+			speech: false,
+			public_progress: false,
+			targets: vec!["discord_dm".into()],
+			discord_dm_user_id: Some("777".into()),
+			dm_channel: Some("88".into()),
+		}
+	}
+	#[test]
+	fn final_third_party_recipient_never_inherits_prompt_authority() {
+		for platform in ["discord", "discord_voice"] {
+			assert_eq!(
+				prompt_destination(&source(platform), &private(), false, "999"),
+				PromptDestination::RequesterDm {
+					user_id: "123".into(),
+					owner_link: false
+				}
+			);
+		}
+		for platform in ["twitch", "youtube"] {
+			assert_eq!(
+				prompt_destination(&source(platform), &private(), true, "999"),
+				PromptDestination::RequesterDm {
+					user_id: "999".into(),
+					owner_link: true
+				}
+			);
+			assert_eq!(
+				prompt_destination(&source(platform), &private(), false, "999"),
+				PromptDestination::Dashboard
+			);
+			assert_eq!(
+				prompt_destination(&source(platform), &private(), true, ""),
+				PromptDestination::Dashboard
+			);
+		}
+	}
+	#[test]
+	fn silent_delivery_cannot_fall_back_to_public_question() {
+		let mut policy = private();
+		policy.targets.clear();
+		assert_eq!(
+			prompt_destination(&source("twitch"), &policy, true, "999"),
+			PromptDestination::Dashboard
+		);
+		policy.targets = vec!["source".into()];
+		assert_eq!(
+			prompt_destination(&source("twitch"), &policy, true, "999"),
+			PromptDestination::Source
+		);
+	}
 }

@@ -382,16 +382,32 @@ impl Engine {
 		if cancellation {
 			let actor = crate::agent_storage::actor(&message);
 			// Sender/channel matching is the same as answering a durable confirmation.
-			for pending in self.store.pending_inputs()?.into_iter().filter(|pending| {
-				pending.actor == actor && pending.channel == crate::agent_storage::channel(&message)
-			}) {
+			for pending in crate::agent::pending_to_cancel(&self.store, &message)? {
 				self.store.cancel_agent_turn(&pending.turn_id)?;
+				self.cancel_actor(&pending.actor).await;
 			}
 			if message.is_owner {
 				self.cancel().await;
 			} else {
 				self.cancel_actor(&actor).await;
 			}
+			return Ok(());
+		}
+		if crate::agent::is_desktop_answer(&message) {
+			let actor = crate::agent::pending_actor_for_message(&self.store, &message)?
+				.context("This question expired or was already answered")?;
+			let mut session = self.session.lock().await;
+			let session = session
+				.as_mut()
+				.context("Start a session before answering")?;
+			if cancel.is_cancelled() || session.cancel.is_cancelled() {
+				return Ok(());
+			}
+			let scope = session.agent_scopes.lease(&actor);
+			session
+				.agent_tx
+				.try_send(AgentJob { message, scope })
+				.context("Bumblebee's conversation queue is full; try again shortly")?;
 			return Ok(());
 		}
 		let images = self.paths.data_dir.join("images");
@@ -443,9 +459,10 @@ impl Engine {
 					|| message.platform == "discord_voice"
 					|| private_dm))
 		{
-			let scope = session
-				.agent_scopes
-				.lease(&crate::agent_storage::actor(&message));
+			let scope = session.agent_scopes.lease(
+				&crate::agent::pending_actor_for_message(&self.store, &message)?
+					.unwrap_or_else(|| crate::agent_storage::actor(&message)),
+			);
 			session
 				.agent_tx
 				.try_send(AgentJob { message, scope })

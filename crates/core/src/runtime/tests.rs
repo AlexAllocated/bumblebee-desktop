@@ -276,3 +276,46 @@ async fn session_stop_surfaces_aborted_work_and_preserves_uncertain_effects_with
 	);
 	engine.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn desktop_pending_answer_is_private_and_uses_original_actor_cancellation() {
+	let (_temporary, engine) = fixture();
+	engine.start().await.unwrap();
+	let (tx, mut rx) = mpsc::channel(4);
+	engine.session.lock().await.as_mut().unwrap().agent_tx = tx;
+	let mut events = engine.events.subscribe();
+	let pending = PendingInput {
+		id: "question".into(),
+		turn_id: "turn".into(),
+		actor: "twitch:123".into(),
+		channel: "twitch:456".into(),
+		kind: "question".into(),
+		prompt: "Private question".into(),
+		choices: vec![],
+		owner_required: false,
+		expires_at: crate::now_ms() + 10000,
+	};
+	engine
+		.store
+		.create_turn("turn", "twitch:123", &json!({}))
+		.unwrap();
+	engine
+		.store
+		.suspend_turn(&pending, &json!({"reply_route":{"kind":"dashboard"}}))
+		.unwrap();
+	let message =
+		crate::agent::desktop_answer_message(&engine.store, "question", "private answer").unwrap();
+	engine.handle_chat(message).await.unwrap();
+	let job = rx.try_recv().unwrap();
+	assert!(crate::agent::is_desktop_answer(&job.message));
+	assert!(engine.store.chatters("").unwrap().is_empty());
+	while let Ok(event) = events.try_recv() {
+		assert!(!matches!(
+			event,
+			OverlayEvent::Chat { .. } | OverlayEvent::Speech { .. }
+		));
+	}
+	assert!(engine.cancel_actor("twitch:123").await);
+	assert!(job.scope.cancel.is_cancelled());
+	engine.stop().await.unwrap();
+}

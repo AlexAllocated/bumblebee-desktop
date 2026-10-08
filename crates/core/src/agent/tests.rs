@@ -8,6 +8,8 @@ use std::{
 };
 
 struct FixtureHost {
+	reply_route: Mutex<Option<ReplyRoute>>,
+	prompts: Mutex<Vec<ReplyRoute>>,
 	store: Store,
 	responses: Mutex<VecDeque<Value>>,
 	effects: Mutex<Vec<String>>,
@@ -20,6 +22,8 @@ struct FixtureHost {
 impl FixtureHost {
 	fn new(path: &std::path::Path, responses: Vec<Value>) -> Self {
 		Self {
+			reply_route: Mutex::new(None),
+			prompts: Mutex::new(vec![]),
 			store: Store::open(path).unwrap(),
 			responses: Mutex::new(responses.into()),
 			effects: Mutex::new(vec![]),
@@ -42,6 +46,15 @@ fn definition(name: &str, confirmation: bool, effect: bool) -> ToolDefinition {
 	}
 }
 impl Host for FixtureHost {
+	async fn reply_route(&self, cp: &Checkpoint, _: bool) -> Result<ReplyRoute> {
+		Ok(self.reply_route.lock().unwrap().clone().unwrap_or_else(|| {
+			if cp.delivery.as_ref().is_some_and(|d| d.targets.is_empty()) {
+				ReplyRoute::Dashboard
+			} else {
+				ReplyRoute::Source
+			}
+		}))
+	}
 	fn store(&self) -> &Store {
 		&self.store
 	}
@@ -105,10 +118,15 @@ impl Host for FixtureHost {
 	}
 	async fn prompt(
 		&self,
-		_: &Checkpoint,
+		cp: &Checkpoint,
 		_: &PendingInput,
 		cancel: CancellationToken,
 	) -> Result<()> {
+		self
+			.prompts
+			.lock()
+			.unwrap()
+			.push(cp.reply_route.clone().unwrap());
 		if self.cancel_during_prompt.load(Ordering::SeqCst) {
 			cancel.cancel();
 		}
@@ -137,9 +155,12 @@ fn terminal(text: &str) -> Value {
 	json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":json!({"text":text,"messages":null}).to_string()}]}]})
 }
 fn checkpoint(host: &FixtureHost) -> Checkpoint {
+	checkpoint_source(host, source("ban the saved user, then announce the result"))
+}
+fn checkpoint_source(host: &FixtureHost, input: ChatMessage) -> Checkpoint {
 	let cp = Checkpoint {
 		id: uuid::Uuid::new_v4().to_string(),
-		source: source("ban the saved user, then announce the result"),
+		source: input,
 		model: "fixture".into(),
 		items: vec![json!({"role":"user","content":"a real request"})],
 		rounds: 0,
@@ -149,6 +170,7 @@ fn checkpoint(host: &FixtureHost) -> Checkpoint {
 		delivery: None,
 		artifacts: vec![],
 		pending: None,
+		reply_route: None,
 		answer: None,
 		approved_call: None,
 		voice_channel_id: None,
@@ -389,4 +411,161 @@ async fn interruption_while_asking_a_question_cancels_its_durable_continuation()
 	assert_eq!(host.store.turn(&cp.id).unwrap().state, "cancelled");
 	assert!(host.store.pending_inputs().unwrap().is_empty());
 	assert!(host.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cross_platform_private_answers_survive_restart_without_delegating_authority() {
+	for platform in ["twitch", "youtube"] {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("state.sqlite");
+		let original = ChatMessage {
+			platform: platform.into(),
+			user_id: "streamer-id".into(),
+			channel_id: "broadcast".into(),
+			..source("perform a private action")
+		};
+		let (turn, pending) = {
+			let host = FixtureHost::new(&path, vec![calls(&[("ban-id", "ban")])]);
+			let mut settings = host.store.settings().unwrap();
+			settings.owner_discord_id = "999".into();
+			host.store.set("installation", &settings).unwrap();
+			*host.reply_route.lock().unwrap() = Some(ReplyRoute::DiscordDm {
+				user_id: "999".into(),
+				channel_id: "55".into(),
+				owner_link: true,
+			});
+			let mut cp = checkpoint_source(&host, original.clone());
+			cp.delivery = Some(Delivery {
+				speech: false,
+				public_progress: false,
+				targets: vec!["discord_dm".into()],
+				discord_dm_user_id: Some("777".into()),
+				dm_channel: Some("friend-dm".into()),
+			});
+			run_guarded(&host, &mut cp, CancellationToken::new())
+				.await
+				.unwrap();
+			let pending = host.store.pending_inputs().unwrap().remove(0);
+			assert_eq!(pending.actor, format!("{platform}:streamer-id"));
+			assert_eq!(pending.channel, format!("{platform}:broadcast"));
+			assert_eq!(
+				pending_to_cancel(
+					&host.store,
+					&ChatMessage {
+						text: "!cancel".into(),
+						..original.clone()
+					}
+				)
+				.unwrap()
+				.len(),
+				1
+			);
+			(cp.id, pending)
+		};
+		let host = FixtureHost::new(&path, vec![terminal("Observed the approved action.")]);
+		host.store.recover_agent_state().unwrap();
+		let reply = ChatMessage {
+			platform: "discord".into(),
+			user_id: "999".into(),
+			channel_id: "55".into(),
+			..source("yes")
+		};
+		assert!(pending_for_message(&host.store, &reply).unwrap());
+		assert_eq!(
+			pending_actor_for_message(&host.store, &reply).unwrap(),
+			Some(format!("{platform}:streamer-id"))
+		);
+		for bad in [
+			ChatMessage {
+				user_id: "777".into(),
+				..reply.clone()
+			},
+			ChatMessage {
+				channel_id: "other-room".into(),
+				..reply.clone()
+			},
+			ChatMessage {
+				text: "yes".into(),
+				..original.clone()
+			},
+		] {
+			assert!(!resume(&host, &bad, CancellationToken::new()).await.unwrap());
+		}
+		let desktop = desktop_answer_message(&host.store, &pending.id, "yes").unwrap();
+		assert!(is_desktop_answer(&desktop));
+		assert_eq!(
+			pending_actor_for_message(&host.store, &desktop).unwrap(),
+			Some(format!("{platform}:streamer-id"))
+		);
+		let mut settings = host.store.settings().unwrap();
+		settings.owner_discord_id = "1000".into();
+		host.store.set("installation", &settings).unwrap();
+		assert!(!pending_for_message(&host.store, &reply).unwrap());
+		assert!(
+			resume(&host, &desktop, CancellationToken::new())
+				.await
+				.is_err()
+		);
+		settings.owner_discord_id = "999".into();
+		host.store.set("installation", &settings).unwrap();
+		host.owner.store(false, Ordering::SeqCst);
+		assert!(
+			resume(&host, &reply, CancellationToken::new())
+				.await
+				.is_err()
+		);
+		assert_eq!(host.store.pending_inputs().unwrap().len(), 1);
+		assert!(host.effects.lock().unwrap().is_empty());
+		host.owner.store(true, Ordering::SeqCst);
+		let accepted = if platform == "twitch" {
+			&reply
+		} else {
+			&desktop
+		};
+		assert!(
+			resume(&host, accepted, CancellationToken::new())
+				.await
+				.unwrap()
+		);
+		assert_eq!(*host.effects.lock().unwrap(), vec!["ban"]);
+		let record = host.store.turn(&turn).unwrap();
+		assert_eq!(record.state, "completed");
+		assert_eq!(record.checkpoint["source"]["platform"], platform);
+		assert!(
+			!resume(&host, accepted, CancellationToken::new())
+				.await
+				.unwrap()
+		);
+	}
+}
+
+#[tokio::test]
+async fn silent_pending_questions_are_dashboard_only_and_do_not_create_chatter_messages() {
+	let host = FixtureHost::new(
+		std::path::Path::new(":memory:"),
+		vec![calls(&[("ban-id", "ban")]), terminal("Done.")],
+	);
+	let mut cp = checkpoint(&host);
+	cp.delivery = Some(Delivery {
+		speech: false,
+		public_progress: false,
+		targets: vec![],
+		discord_dm_user_id: None,
+		dm_channel: None,
+	});
+	run_guarded(&host, &mut cp, CancellationToken::new())
+		.await
+		.unwrap();
+	assert_eq!(*host.prompts.lock().unwrap(), vec![ReplyRoute::Dashboard]);
+	assert!(!pending_for_message(&host.store, &source("yes")).unwrap());
+	let p = host.store.pending_inputs().unwrap().remove(0);
+	let answer = desktop_answer_message(&host.store, &p.id, "yes").unwrap();
+	assert!(is_desktop_answer(&answer));
+	assert_eq!(answer.channel_id, p.id);
+	assert!(
+		resume(&host, &answer, CancellationToken::new())
+			.await
+			.unwrap()
+	);
+	assert!(host.store.chatters("").unwrap().is_empty());
 }
