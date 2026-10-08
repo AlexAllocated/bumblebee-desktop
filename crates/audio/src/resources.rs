@@ -11,6 +11,8 @@ pub struct NativeResources {
 	pub keyword_models: PathBuf,
 }
 static RESOURCES: OnceLock<NativeResources> = OnceLock::new();
+#[cfg(not(windows))]
+static SPEECH_CORE: OnceLock<libloading::Library> = OnceLock::new();
 
 impl NativeResources {
 	/// `root` contains `native/` and `keyword_models/` in the application bundle.
@@ -122,6 +124,66 @@ mod tests {
 		.probe()
 		.unwrap();
 	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	#[ignore = "requires prepared packaged native resources"]
+	fn installed_probe_ignores_appimage_shadow_core_without_extensions() {
+		use std::{
+			process::{Command, Stdio},
+			time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+		};
+		let native =
+			std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/native");
+		let shadow = std::env::temp_dir().join(format!(
+			"bumblebee-shadow-speech-{}-{}",
+			std::process::id(),
+			SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap()
+				.as_nanos(),
+		));
+		std::fs::create_dir(&shadow).unwrap();
+		std::fs::copy(
+			native.join("libMicrosoft.CognitiveServices.Speech.core.so"),
+			shadow.join("libMicrosoft.CognitiveServices.Speech.core.so"),
+		)
+		.unwrap();
+		let mut paths = vec![shadow.clone()];
+		if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+			paths.extend(std::env::split_paths(&existing));
+		}
+		// A fresh process is essential: the dynamic loader and native APIs keep
+		// libraries cached. This recreates AppRun's shadow core without its KWS
+		// extensions and exercises the actual packaged create/poll/close path.
+		let mut child = Command::new(std::env::current_exe().unwrap())
+			.args([
+				"--exact",
+				"resources::tests::installed_probe_exercises_silent_native_lifecycles",
+				"--ignored",
+				"--nocapture",
+			])
+			.env("LD_LIBRARY_PATH", std::env::join_paths(paths).unwrap())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::piped())
+			.spawn()
+			.unwrap();
+		let deadline = Instant::now() + Duration::from_secs(30);
+		while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+			std::thread::sleep(Duration::from_millis(20));
+		}
+		if child.try_wait().unwrap().is_none() {
+			child.kill().unwrap();
+		}
+		let result = child.wait_with_output().unwrap();
+		std::fs::remove_dir_all(shadow).unwrap();
+		assert!(
+			result.status.success(),
+			"AppImage shadow core broke native lifecycle: {} {}",
+			String::from_utf8_lossy(&result.stdout),
+			String::from_utf8_lossy(&result.stderr)
+		);
+	}
 }
 pub(crate) fn configured() -> Result<&'static NativeResources> {
 	RESOURCES
@@ -137,6 +199,17 @@ pub(crate) fn speech_library_name() -> &'static str {
 }
 
 pub(crate) fn load_speech_library() -> Result<libloading::Library> {
+	// AppImage adds usr/lib to LD_LIBRARY_PATH and linuxdeploy may copy the
+	// Speech core there without its delayed keyword extensions. Load the core
+	// beside those extensions first so the wrapper's dependency resolves to
+	// that exact runtime, even when the launcher shadows its $ORIGIN path.
+	// Retain one successful load for the process lifetime. A failed load leaves
+	// the cell empty so a retry remains possible; racing extra handles drop.
+	#[cfg(not(windows))]
+	if SPEECH_CORE.get().is_none() {
+		let core = load_native_library("libMicrosoft.CognitiveServices.Speech.core.so")?;
+		let _ = SPEECH_CORE.set(core);
+	}
 	load_native_library(speech_library_name())
 }
 pub(crate) fn vad_library_name() -> &'static str {
